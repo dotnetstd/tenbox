@@ -40,14 +40,13 @@ mkdir -p "$BUILD_DIR"
 
 # Cache directories
 CACHE_DIR="$BUILD_DIR/.rootfs-cache"
-CHECKPOINT_DIR="$CACHE_DIR/checkpoints"
+CHECKPOINT_DIR="$CACHE_DIR/checkpoints-openclaw"
 APT_CACHE_DIR="$CACHE_DIR/apt-archives"
 SCRIPTS_CACHE_DIR="$CACHE_DIR/scripts"
 mkdir -p "$CHECKPOINT_DIR" "$APT_CACHE_DIR" "$SCRIPTS_CACHE_DIR"
 
 # Cache files
 CACHE_TAR="$CACHE_DIR/debootstrap-${SUITE}-base.tar"
-CACHE_CHROME="$CACHE_DIR/google-chrome-stable_current_amd64.deb"
 CACHE_NODESOURCE="$SCRIPTS_CACHE_DIR/nodesource_setup_22.x.sh"
 CACHE_OPENCLAW="$SCRIPTS_CACHE_DIR/openclaw_install.sh"
 
@@ -110,7 +109,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-OUTPUT="$(realpath -m "${OUTPUT_ARG:-$BUILD_DIR/share/rootfs.qcow2}")"
+if [ -n "$OUTPUT_ARG" ]; then
+    OUTPUT="$(realpath -m "$OUTPUT_ARG")"
+else
+    OUTPUT=""  # will be determined after openclaw version is known
+    OUTPUT_DIR="$(realpath -m "$BUILD_DIR/share")"
+fi
+
+OPENCLAW_VERSION=""
 
 # Step definitions
 STEPS=(
@@ -123,11 +129,9 @@ STEPS=(
     "install_xfce"
     "install_spice"
     "install_guest_agent"
-    "install_chrome"
-    "config_chrome"
     "install_devtools"
-    "install_usertools"
     "install_audio"
+    "install_usertools"
     "install_nodejs"
     "install_openclaw"
     "config_locale"
@@ -153,11 +157,9 @@ STEP_DESCRIPTIONS=(
     "Install XFCE desktop"
     "Install SPICE vdagent"
     "Install Guest Agent"
-    "Install Google Chrome"
-    "Configure Chrome"
     "Install development tools"
-    "Install user tools (editor, viewer, etc.)"
     "Install audio (PulseAudio + ALSA)"
+    "Install user tools (Chromium, etc.)"
     "Install Node.js 22"
     "Install OpenClaw"
     "Configure locale"
@@ -406,10 +408,13 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     xfce4 xfce4-terminal xfce4-power-manager \
     lightdm \
     xserver-xorg-core xserver-xorg-input-libinput \
-    xfonts-base fonts-dejavu-core fonts-noto-cjk fonts-noto-color-emoji \
+    xfonts-base fonts-dejavu-core fonts-liberation fonts-noto-cjk fonts-noto-color-emoji \
     locales \
     dbus-x11 at-spi2-core \
-    policykit-1 policykit-1-gnome
+    policykit-1 policykit-1-gnome \
+    mousepad ristretto \
+    thunar thunar-archive-plugin engrampa \
+    tumbler xfce4-taskmanager
 EOF
 }
 
@@ -460,77 +465,6 @@ systemctl enable qemu-guest-agent.service 2>/dev/null || true
 EOF
 }
 
-do_install_chrome() {
-    # Download Chrome (with cache, atomic write to avoid corruption)
-    if [ -f "$CACHE_CHROME" ] && dpkg-deb --info "$CACHE_CHROME" &>/dev/null; then
-        echo "  Using cached Chrome: $CACHE_CHROME"
-    else
-        echo "  Downloading Google Chrome..."
-        rm -f "$CACHE_CHROME" "$CACHE_CHROME.tmp"
-        wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O "$CACHE_CHROME.tmp"
-        mv "$CACHE_CHROME.tmp" "$CACHE_CHROME"
-    fi
-    sudo cp "$CACHE_CHROME" "$MOUNT_DIR/tmp/chrome.deb"
-    
-    sudo chroot "$MOUNT_DIR" /bin/bash -e << 'EOF'
-if dpkg -s google-chrome-stable &>/dev/null; then
-    echo "  Chrome already installed"
-    rm -f /tmp/chrome.deb
-    exit 0
-fi
-echo "Installing Google Chrome..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/chrome.deb
-rm -f /tmp/chrome.deb
-EOF
-}
-
-do_config_chrome() {
-    sudo chroot "$MOUNT_DIR" /bin/bash -e << EOF
-# Skip if already configured
-if [ -f /etc/opt/chrome/policies/managed/tenbox_policy.json ]; then
-    echo "  Chrome already configured"
-    exit 0
-fi
-
-mkdir -p /etc/opt/chrome/policies/managed
-cat > /etc/opt/chrome/policies/managed/tenbox_policy.json << 'CHROME'
-{
-    "DefaultBrowserSettingEnabled": false,
-    "BrowserSignin": 0,
-    "SyncDisabled": true,
-    "PasswordManagerEnabled": false,
-    "AutofillAddressEnabled": false,
-    "AutofillCreditCardEnabled": false,
-    "TranslateEnabled": false,
-    "RestoreOnStartup": 5,
-    "MetricsReportingEnabled": false,
-    "PromotionalTabsEnabled": false,
-    "WelcomePageOnOSUpgradeEnabled": false,
-    "ImportBookmarks": false,
-    "BookmarkBarEnabled": true,
-    "ShowHomeButton": true,
-    "HomepageLocation": "chrome://newtab"
-}
-CHROME
-mkdir -p /home/$USER_NAME/.config/google-chrome
-touch "/home/$USER_NAME/.config/google-chrome/First Run"
-chown -R $USER_NAME:$USER_NAME /home/$USER_NAME/.config
-
-# Set Chrome as default browser
-update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/google-chrome-stable 200
-update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/google-chrome-stable 200
-mkdir -p /home/$USER_NAME/.config
-cat > /home/$USER_NAME/.config/mimeapps.list << 'MIME'
-[Default Applications]
-x-scheme-handler/http=google-chrome.desktop
-x-scheme-handler/https=google-chrome.desktop
-text/html=google-chrome.desktop
-application/xhtml+xml=google-chrome.desktop
-MIME
-chown -R $USER_NAME:$USER_NAME /home/$USER_NAME/.config
-EOF
-}
-
 do_install_devtools() {
     sudo chroot "$MOUNT_DIR" /bin/bash -e << 'EOF'
 if dpkg -s python3 &>/dev/null && dpkg -s g++ &>/dev/null && dpkg -s cmake &>/dev/null; then
@@ -546,18 +480,17 @@ EOF
 }
 
 do_install_usertools() {
-    sudo chroot "$MOUNT_DIR" /bin/bash -e << 'EOF'
-if dpkg -s mousepad &>/dev/null; then
+    sudo chroot "$MOUNT_DIR" /bin/bash -e << EOF
+if dpkg -s chromium &>/dev/null; then
     echo "  User tools already installed"
     exit 0
 fi
-echo "Installing user tools (text editor, image viewer, file manager, etc.)..."
+echo "Installing user tools (browser, etc.)..."
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    mousepad \
-    ristretto \
-    thunar thunar-archive-plugin \
-    engrampa \
-    xfce4-taskmanager
+    chromium
+
+echo "Setting PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH in .bashrc..."
+su - $USER_NAME -c 'echo "export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium" >> ~/.bashrc'
 EOF
 }
 
@@ -622,6 +555,15 @@ echo "Installing OpenClaw..."
 bash /tmp/openclaw_install.sh --no-onboard
 rm -f /tmp/openclaw_install.sh
 EOF
+
+    # Extract version for output filename
+    OPENCLAW_VERSION=$(sudo chroot "$MOUNT_DIR" npm ls -g openclaw 2>/dev/null \
+        | grep 'openclaw@' | sed 's/.*openclaw@//' || true)
+    if [ -n "$OPENCLAW_VERSION" ]; then
+        echo "  OpenClaw version: $OPENCLAW_VERSION"
+    else
+        echo "  WARNING: Could not detect OpenClaw version"
+    fi
 }
 
 do_config_locale() {
@@ -767,7 +709,7 @@ check "init"              test -x /sbin/init
 check "systemd"           dpkg -s systemd
 check "xfce4"             dpkg -s xfce4
 check "lightdm"           dpkg -s lightdm
-check "google-chrome"     dpkg -s google-chrome-stable
+check "chromium"          dpkg -s chromium
 check "spice-vdagent"     dpkg -s spice-vdagent
 check "qemu-guest-agent"  dpkg -s qemu-guest-agent
 check "pulseaudio"        dpkg -s pulseaudio
@@ -783,6 +725,13 @@ EOF
 }
 
 do_cleanup_chroot() {
+    # Detect version from chroot if not already known (e.g. on resume)
+    if [ -z "$OPENCLAW_VERSION" ]; then
+        OPENCLAW_VERSION=$(sudo chroot "$MOUNT_DIR" npm ls -g openclaw 2>/dev/null \
+            | grep 'openclaw@' | sed 's/.*openclaw@//' || true)
+        [ -n "$OPENCLAW_VERSION" ] && echo "  Detected OpenClaw version: $OPENCLAW_VERSION"
+    fi
+
     # Clean apt cache inside chroot (but keep host cache)
     sudo chroot "$MOUNT_DIR" /bin/bash -e << 'EOF'
 apt-get clean
@@ -809,6 +758,16 @@ do_unmount_image() {
 }
 
 do_convert_qcow2() {
+    # Resolve final output path with version if not explicitly specified
+    if [ -z "$OUTPUT" ]; then
+        if [ -n "$OPENCLAW_VERSION" ]; then
+            OUTPUT="$OUTPUT_DIR/rootfs-openclaw-${OPENCLAW_VERSION}.qcow2"
+        else
+            OUTPUT="$OUTPUT_DIR/rootfs-openclaw.qcow2"
+        fi
+    fi
+    mkdir -p "$(dirname "$OUTPUT")"
+
     echo "Converting to qcow2..."
     # Prefer Windows qemu-img.exe (supports zstd), fallback to WSL version
     WIN_QEMU="/mnt/c/Program Files/qemu/qemu-img.exe"
@@ -833,11 +792,9 @@ run_step "apt_update"     "Updating apt sources"      do_apt_update
 run_step "install_xfce"   "Installing XFCE desktop"   do_install_xfce
 run_step "install_spice"  "Installing SPICE vdagent"  do_install_spice
 run_step "install_guest_agent" "Installing Guest Agent" do_install_guest_agent
-run_step "install_chrome" "Installing Chrome"         do_install_chrome
-run_step "config_chrome"  "Configuring Chrome"        do_config_chrome
 run_step "install_devtools" "Installing dev tools"    do_install_devtools
-run_step "install_usertools" "Installing user tools"  do_install_usertools
 run_step "install_audio"  "Installing audio"          do_install_audio
+run_step "install_usertools" "Installing user tools"  do_install_usertools
 run_step "install_nodejs" "Installing Node.js"        do_install_nodejs
 run_step "install_openclaw" "Installing OpenClaw"     do_install_openclaw
 run_step "config_locale"  "Configuring locale"        do_config_locale
