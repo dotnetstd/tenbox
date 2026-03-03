@@ -4,6 +4,7 @@ add_executable(tenbox-manager WIN32
     ${CMAKE_SOURCE_DIR}/src/manager/app_settings.cpp
     ${CMAKE_SOURCE_DIR}/src/manager/image_source.cpp
     ${CMAKE_SOURCE_DIR}/src/manager/http_download.cpp
+    ${CMAKE_SOURCE_DIR}/src/manager/update_checker.cpp
     ${CMAKE_SOURCE_DIR}/src/manager/app.manifest
     ${CMAKE_SOURCE_DIR}/src/manager/toolbar.rc
 )

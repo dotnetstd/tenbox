@@ -184,6 +184,17 @@ enum class S {
     kImgCacheDeleted,
     kImgCacheDeleteFailed,
 
+    // Auto-update
+    kUpdateAvailableTitle,
+    kUpdateAvailableMsg,
+    kUpdateNow,
+    kUpdateSkip,
+    kUpdateDownloading,
+    kUpdateDownloadProgress,
+    kUpdateDownloadFailed,
+    kUpdateInstalling,
+    kUpdateLatest,
+
     kCount  // Must be last
 };
 

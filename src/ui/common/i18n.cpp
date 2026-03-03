@@ -134,6 +134,15 @@ static const char* kStringsEn[] = {
     "Delete cache for '%s'?\nDownloaded files will be removed.",  // kImgConfirmDeleteCacheMsg
     "Cache deleted.",                        // kImgCacheDeleted
     "Failed to delete cache: %s",            // kImgCacheDeleteFailed
+    "Update Available",                      // kUpdateAvailableTitle
+    "A new version %s is available (current: %s).\n\n%s\n\nWould you like to update now?",  // kUpdateAvailableMsg
+    "Update Now",                            // kUpdateNow
+    "Not Now",                               // kUpdateSkip
+    "Downloading update...",                 // kUpdateDownloading
+    "Downloading... %d%%",                   // kUpdateDownloadProgress
+    "Failed to download update: %s",         // kUpdateDownloadFailed
+    "Installing update...",                  // kUpdateInstalling
+    "You are running the latest version.",   // kUpdateLatest
 };
 
 // Simplified Chinese strings; order must match enum S
@@ -261,6 +270,15 @@ static const char* kStringsZhCN[] = {
     "确认删除 '%s' 的缓存吗？\n已下载文件将被移除。",  // kImgConfirmDeleteCacheMsg
     "缓存已删除。",                          // kImgCacheDeleted
     "删除缓存失败：%s",                      // kImgCacheDeleteFailed
+    "发现新版本",                            // kUpdateAvailableTitle
+    "新版本 %s 已发布（当前版本: %s）。\n\n%s\n\n是否立即更新？",  // kUpdateAvailableMsg
+    "立即更新",                              // kUpdateNow
+    "暂不更新",                              // kUpdateSkip
+    "正在下载更新...",                       // kUpdateDownloading
+    "正在下载... %d%%",                      // kUpdateDownloadProgress
+    "下载更新失败：%s",                      // kUpdateDownloadFailed
+    "正在安装更新...",                       // kUpdateInstalling
+    "当前已是最新版本。",                    // kUpdateLatest
 };
 
 void InitLanguage() {
