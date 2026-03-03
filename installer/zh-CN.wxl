@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="zh-CN" 
+                 xmlns="http://wixtoolset.org/schemas/v4/wxs/localization">
+  
+  <!-- Dialog titles and text -->
+  <String Id="DialogTitleInstall">TenBox 安装向导</String>
+  <String Id="DialogTitleMaintenance">TenBox - 维护</String>
+  <String Id="DialogTitleRepair">TenBox - 修复</String>
+  <String Id="DialogTitleUninstall">TenBox - 卸载</String>
+  
+  <!-- Common buttons -->
+  <String Id="ButtonBack">&lt; 上一步</String>
+  <String Id="ButtonNext">下一步 &gt;</String>
+  <String Id="ButtonCancel">取消</String>
+  <String Id="ButtonInstall">安装</String>
+  <String Id="ButtonRepair">修复</String>
+  <String Id="ButtonRemove">卸载</String>
+  <String Id="ButtonFinish">完成</String>
+  <String Id="ButtonClose">关闭</String>
+  
+  <!-- Welcome dialog -->
+  <String Id="WelcomeDialogTitle">欢迎使用 TenBox 安装向导</String>
+  <String Id="WelcomeDialogBody">该向导将指导您完成 TenBox 的安装。
+
+TenBox 是一个轻量级虚拟机管理器。
+
+建议在继续前关闭所有其他应用程序。
+
+单击"下一步"继续。</String>
+  
+  <!-- Install Folder dialog -->
+  <String Id="InstallFolderDialogTitle">选择安装文件夹</String>
+  <String Id="InstallFolderDialogBody">选择要安装 TenBox 的文件夹。</String>
+  <String Id="InstallFolderDialogSubBody">TenBox 将安装在以下文件夹中。要选择其他文件夹，单击"浏览"。</String>
+  <String Id="BrowseButton">浏览(&amp;B)...</String>
+  <String Id="FolderLabel">文件夹(&amp;F):</String>
+  
+  <!-- Progress dialog -->
+  <String Id="ProgressDialogTitle">正在安装 TenBox</String>
+  <String Id="ProgressDialogBody">正在安装文件，请稍候...</String>
+  <String Id="ProgressLabel">正在处理:</String>
+  
+  <!-- Exit dialog -->
+  <String Id="FinishDialogTitle">完成 TenBox 安装</String>
+  <String Id="FinishDialogBody">TenBox 已成功安装。
+
+单击"完成"关闭此向导。</String>
+  <String Id="FinishDialogOptionalCheckBoxLabel">启动 TenBox</String>
+  
+  <!-- Error messages -->
+  <String Id="ErrorTitle">安装程序错误</String>
+  <String Id="ErrorInstallFailed">安装失败。请重试或联系支持。</String>
+  <String Id="ErrorUninstallFailed">卸载失败。请重试或联系支持。</String>
+  
+  <!-- Uninstall dialog -->
+  <String Id="UninstallDialogTitle">卸载 TenBox</String>
+  <String Id="UninstallDialogBody">是否确实要卸载 TenBox？
+
+所有 TenBox 文件将被删除。</String>
+  <String Id="UninstallProgressDialogBody">正在卸载文件，请稍候...</String>
+  <String Id="UninstallFinishDialogBody">TenBox 已成功卸载。</String>
+  
+</WixLocalization>

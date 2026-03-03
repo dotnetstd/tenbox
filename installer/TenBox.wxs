@@ -8,13 +8,18 @@
            UpgradeCode="77F75DD3-2517-4A59-90E9-9A030242A116"
            Scope="perMachine"
            InstallerVersion="500"
-           Compressed="yes">
+           Compressed="yes"
+           Languages="1033,2052">
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of TenBox is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
-    <!-- Installer UI with directory selection -->
+    <!-- Installer UI with directory selection and localization -->
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+
+    <!-- Localization files -->
+    <WixLocalization Id="en-US" />
+    <WixLocalization Id="zh-CN" Source="$(var.ProjectDir)\installer\zh-CN.wxl" />
 
     <!-- Use project's GPL v3 license -->
     <WixVariable Id="WixUILicenseRtf" Value="$(var.ProjectDir)\installer\license.rtf" />
