@@ -18,8 +18,8 @@ static const char* StateText(VmPowerState s) {
 // ── Create ──
 
 void VmListView::Create(HWND parent, HINSTANCE hinst, HFONT ui_font) {
-    hwnd_ = CreateWindowExA(
-        WS_EX_CLIENTEDGE, WC_LISTVIEWA, nullptr,
+    hwnd_ = CreateWindowExW(
+        WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
         WS_CHILD | WS_VISIBLE | WS_VSCROLL |
         LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
         LVS_OWNERDATA | LVS_NOCOLUMNHEADER,
@@ -40,10 +40,10 @@ void VmListView::Create(HWND parent, HINSTANCE hinst, HFONT ui_font) {
     HIMAGELIST hil = ImageList_Create(1, kItemHeight, ILC_COLOR32, 1, 0);
     ListView_SetImageList(hwnd_, hil, LVSIL_SMALL);
 
-    LVCOLUMNA col{};
+    LVCOLUMNW col{};
     col.mask = LVCF_WIDTH;
     col.cx = 0;
-    SendMessageA(hwnd_, LVM_INSERTCOLUMNA, 0, reinterpret_cast<LPARAM>(&col));
+    SendMessageW(hwnd_, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&col));
 
     SendMessage(hwnd_, WM_SETFONT,
         reinterpret_cast<WPARAM>(ui_font), FALSE);
@@ -60,7 +60,7 @@ void VmListView::UpdateColumnWidth() {
 // ── Populate ──
 
 void VmListView::Populate(const std::vector<VmRecord>& records, int selected_index) {
-    SendMessageA(hwnd_, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(hwnd_, WM_SETREDRAW, FALSE, 0);
 
     ListView_SetItemCountEx(hwnd_, static_cast<int>(records.size()),
         LVSICF_NOINVALIDATEALL);
@@ -77,7 +77,7 @@ void VmListView::Populate(const std::vector<VmRecord>& records, int selected_ind
         ListView_EnsureVisible(hwnd_, selected_index, FALSE);
     }
 
-    SendMessageA(hwnd_, WM_SETREDRAW, TRUE, 0);
+    SendMessageW(hwnd_, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
@@ -113,8 +113,8 @@ void VmListView::DrawItem(HDC hdc, const RECT& rc, const VmRecord& rec,
 
     HFONT old_font = static_cast<HFONT>(SelectObject(hdc, font));
 
-    TEXTMETRICA tm{};
-    GetTextMetricsA(hdc, &tm);
+    TEXTMETRICW tm{};
+    GetTextMetricsW(hdc, &tm);
     int line_h = tm.tmHeight + tm.tmExternalLeading;
 
     int x = card.left + 12;
@@ -159,10 +159,10 @@ bool VmListView::HandleNotify(NMHDR* nmhdr, const std::vector<VmRecord>& records
         return false;
 
     switch (nmhdr->code) {
-    case LVN_GETDISPINFOA: {
-        auto* di = reinterpret_cast<NMLVDISPINFOA*>(nmhdr);
+    case LVN_GETDISPINFOW: {
+        auto* di = reinterpret_cast<NMLVDISPINFOW*>(nmhdr);
         if (di->item.mask & LVIF_TEXT) {
-            di->item.pszText[0] = '\0';
+            di->item.pszText[0] = L'\0';
         }
         if (di->item.mask & LVIF_IMAGE) {
             di->item.iImage = -1;

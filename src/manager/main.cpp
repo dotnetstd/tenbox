@@ -15,12 +15,12 @@ using UiShell = Win32UiShell;
 #include <vector>
 
 static std::string ResolveDefaultRuntimeExePath() {
-    char self[MAX_PATH]{};
-    DWORD len = GetModuleFileNameA(nullptr, self, MAX_PATH);
+    wchar_t self[MAX_PATH]{};
+    DWORD len = GetModuleFileNameW(nullptr, self, MAX_PATH);
     if (len == 0 || len >= MAX_PATH) {
         return "tenbox-vm-runtime.exe";
     }
-    std::string path(self, len);
+    std::string path = i18n::wide_to_utf8(self);
     size_t sep = path.find_last_of("\\/");
     if (sep == std::string::npos) {
         return "tenbox-vm-runtime.exe";
@@ -38,11 +38,11 @@ static void PrintUsage(const char* prog, const char* default_runtime) {
         prog, default_runtime);
 }
 
-static constexpr const char* kMutexName = "TenBoxManager_SingleInstance";
-static constexpr const char* kWndClass = "TenBoxManagerWin32";
+static constexpr const wchar_t* kMutexName = L"TenBoxManager_SingleInstance";
+static constexpr const wchar_t* kWndClass = L"TenBoxManagerWin32";
 
 static bool ActivateExistingInstance() {
-    HWND hwnd = FindWindowA(kWndClass, nullptr);
+    HWND hwnd = FindWindowW(kWndClass, nullptr);
     if (hwnd) {
         if (IsIconic(hwnd))
             ShowWindow(hwnd, SW_RESTORE);
@@ -110,18 +110,18 @@ static bool CheckHypervisorAndPrompt() {
         return true;
 
     if (status == HvStatus::kNoDll) {
-        MessageBoxA(nullptr,
-            i18n::tr(i18n::S::kHvNoDllMessage),
-            i18n::tr(i18n::S::kHvCheckTitle),
+        MessageBoxW(nullptr,
+            i18n::tr_w(i18n::S::kHvNoDllMessage).c_str(),
+            i18n::tr_w(i18n::S::kHvCheckTitle).c_str(),
             MB_OK | MB_ICONERROR);
         return true;
     }
 
-    const auto title = i18n::to_wide(i18n::tr(i18n::S::kHvCheckTitle));
-    const auto message = i18n::to_wide(i18n::tr(i18n::S::kHvCheckMessage));
-    const auto btnAuto = i18n::to_wide(i18n::tr(i18n::S::kHvBtnAutoEnable));
-    const auto btnManual = i18n::to_wide(i18n::tr(i18n::S::kHvBtnManualOpen));
-    const auto btnIgnore = i18n::to_wide(i18n::tr(i18n::S::kHvBtnIgnore));
+    const auto title = i18n::tr_w(i18n::S::kHvCheckTitle);
+    const auto message = i18n::tr_w(i18n::S::kHvCheckMessage);
+    const auto btnAuto = i18n::tr_w(i18n::S::kHvBtnAutoEnable);
+    const auto btnManual = i18n::tr_w(i18n::S::kHvBtnManualOpen);
+    const auto btnIgnore = i18n::tr_w(i18n::S::kHvBtnIgnore);
 
     TASKDIALOG_BUTTON buttons[] = {
         { 1001, btnAuto.c_str() },
@@ -146,9 +146,9 @@ static bool CheckHypervisorAndPrompt() {
 
     if (clicked == 1001) {
         if (EnableHypervisorPlatform()) {
-            int answer = MessageBoxA(nullptr,
-                i18n::tr(i18n::S::kHvEnableSuccessMsg),
-                i18n::tr(i18n::S::kHvEnableSuccessTitle),
+            int answer = MessageBoxW(nullptr,
+                i18n::tr_w(i18n::S::kHvEnableSuccessMsg).c_str(),
+                i18n::tr_w(i18n::S::kHvEnableSuccessTitle).c_str(),
                 MB_YESNO | MB_ICONINFORMATION);
             if (answer == IDYES) {
                 // InitiateSystemShutdownEx with EWX_REBOOT flag
@@ -167,21 +167,24 @@ static bool CheckHypervisorAndPrompt() {
             }
             return false;
         } else {
-            MessageBoxA(nullptr,
-                i18n::tr(i18n::S::kHvEnableFailMsg),
-                i18n::tr(i18n::S::kHvEnableFailTitle),
+            MessageBoxW(nullptr,
+                i18n::tr_w(i18n::S::kHvEnableFailMsg).c_str(),
+                i18n::tr_w(i18n::S::kHvEnableFailTitle).c_str(),
                 MB_OK | MB_ICONERROR);
         }
     } else if (clicked == 1002) {
-        ShellExecuteA(nullptr, "open", "optionalfeatures.exe",
-                      nullptr, nullptr, SW_SHOWNORMAL);
+        SHELLEXECUTEINFOW sei{sizeof(sei)};
+        sei.lpVerb = L"open";
+        sei.lpFile = L"optionalfeatures.exe";
+        sei.nShow = SW_SHOWNORMAL;
+        ShellExecuteExW(&sei);
         return false;
     }
     return true;
 }
 
 int main(int argc, char* argv[]) {
-    HANDLE hMutex = CreateMutexA(nullptr, FALSE, kMutexName);
+    HANDLE hMutex = CreateMutexW(nullptr, FALSE, kMutexName);
     if (hMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(hMutex);
         ActivateExistingInstance();
@@ -205,7 +208,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    DWORD attrs = GetFileAttributesA(runtime_exe.c_str());
+    std::wstring runtime_exe_w = i18n::to_wide(runtime_exe);
+    DWORD attrs = GetFileAttributesW(runtime_exe_w.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
         fprintf(stderr, "runtime executable not found: %s\n", runtime_exe.c_str());
         PrintUsage(argv[0], ResolveDefaultRuntimeExePath().c_str());

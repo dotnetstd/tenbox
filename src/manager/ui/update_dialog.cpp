@@ -32,18 +32,18 @@ struct UpdateDlgData {
 };
 
 static std::string GetMsiTempPath(const std::string& version) {
-    char tmp[MAX_PATH]{};
-    GetTempPathA(MAX_PATH, tmp);
-    return std::string(tmp) + "TenBox-" + version + ".msi";
+    wchar_t tmp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, tmp);
+    return i18n::wide_to_utf8(tmp) + "TenBox-" + version + ".msi";
 }
 
 static INT_PTR CALLBACK UpdateDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
-    auto* data = reinterpret_cast<UpdateDlgData*>(GetWindowLongPtrA(dlg, DWLP_USER));
+    auto* data = reinterpret_cast<UpdateDlgData*>(GetWindowLongPtrW(dlg, DWLP_USER));
 
     switch (msg) {
     case WM_INITDIALOG: {
         data = reinterpret_cast<UpdateDlgData*>(lp);
-        SetWindowLongPtrA(dlg, DWLP_USER, reinterpret_cast<LONG_PTR>(data));
+        SetWindowLongPtrW(dlg, DWLP_USER, reinterpret_cast<LONG_PTR>(data));
 
         RECT rc;
         GetClientRect(dlg, &rc);
@@ -57,10 +57,10 @@ static INT_PTR CALLBACK UpdateDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
 
         HWND status = GetDlgItem(dlg, IDC_UP_STATUS);
         MoveWindow(status, margin, y, cw, line_h, FALSE);
-        SetWindowTextA(status, i18n::tr(i18n::S::kUpdateDownloading));
+        SetWindowTextW(status, i18n::tr_w(i18n::S::kUpdateDownloading).c_str());
         y += line_h + margin / 2;
 
-        HWND progress = CreateWindowExA(0, PROGRESS_CLASSA, "",
+        HWND progress = CreateWindowExW(0, PROGRESS_CLASSW, L"",
             WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
             margin, y, cw, line_h,
             dlg, reinterpret_cast<HMENU>(IDC_UP_PROGRESS),
@@ -101,9 +101,8 @@ static INT_PTR CALLBACK UpdateDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
         int pct = static_cast<int>(wp);
         HWND progress = GetDlgItem(dlg, IDC_UP_PROGRESS);
         if (progress) SendMessage(progress, PBM_SETPOS, pct, 0);
-        char buf[64];
-        snprintf(buf, sizeof(buf), i18n::tr(i18n::S::kUpdateDownloadProgress), pct);
-        SetDlgItemTextA(dlg, IDC_UP_STATUS, buf);
+        std::string buf = i18n::fmt(i18n::S::kUpdateDownloadProgress, pct);
+        SetDlgItemTextW(dlg, IDC_UP_STATUS, i18n::to_wide(buf).c_str());
         return TRUE;
     }
 
@@ -113,15 +112,18 @@ static INT_PTR CALLBACK UpdateDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
 
         if (wp == 1) {
             data->download_ok = true;
-            SetDlgItemTextA(dlg, IDC_UP_STATUS, i18n::tr(i18n::S::kUpdateInstalling));
-            ShellExecuteA(nullptr, "open", data->msi_path.c_str(),
-                          nullptr, nullptr, SW_SHOWNORMAL);
+            SetDlgItemTextW(dlg, IDC_UP_STATUS, i18n::tr_w(i18n::S::kUpdateInstalling).c_str());
+            SHELLEXECUTEINFOW sei{sizeof(sei)};
+            sei.lpVerb = L"open";
+            sei.lpFile = i18n::to_wide(data->msi_path).c_str();
+            sei.nShow = SW_SHOWNORMAL;
+            ShellExecuteExW(&sei);
             data->launched = true;
             EndDialog(dlg, IDOK);
         } else {
             if (!data->cancel_flag.load()) {
                 std::string msg = i18n::fmt(i18n::S::kUpdateDownloadFailed, "download error");
-                MessageBoxA(dlg, msg.c_str(), i18n::tr(i18n::S::kError), MB_OK | MB_ICONERROR);
+                MessageBoxW(dlg, i18n::to_wide(msg).c_str(), i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONERROR);
             }
             EndDialog(dlg, IDCANCEL);
         }
@@ -153,7 +155,7 @@ static void ShowDownloadDialog(HWND parent, UpdateDlgData& data) {
     b.AddStatic(IDC_UP_STATUS, "", 0, 0, 0, 0);
     b.AddButton(IDC_UP_CANCEL, i18n::tr(S::kDlgBtnCancel), 0, 0, 48, 14);
 
-    DialogBoxIndirectParamA(GetModuleHandle(nullptr), b.Build(), parent,
+    DialogBoxIndirectParamW(GetModuleHandle(nullptr), b.Build(), parent,
         UpdateDlgProc, reinterpret_cast<LPARAM>(&data));
 }
 
@@ -163,10 +165,10 @@ bool ShowUpdateDialog(HWND parent, const update::UpdateInfo& info) {
     std::string msg = i18n::fmt(S::kUpdateAvailableMsg,
         info.latest_version.c_str(), TENBOX_VERSION_STR, info.release_notes.c_str());
 
-    auto title_w = i18n::to_wide(i18n::tr(S::kUpdateAvailableTitle));
+    auto title_w = i18n::tr_w(S::kUpdateAvailableTitle);
     auto msg_w = i18n::to_wide(msg.c_str());
-    auto btn_update_w = i18n::to_wide(i18n::tr(S::kUpdateNow));
-    auto btn_skip_w = i18n::to_wide(i18n::tr(S::kUpdateSkip));
+    auto btn_update_w = i18n::tr_w(S::kUpdateNow);
+    auto btn_skip_w = i18n::tr_w(S::kUpdateSkip);
 
     TASKDIALOG_BUTTON buttons[] = {
         { IDYES, btn_update_w.c_str() },

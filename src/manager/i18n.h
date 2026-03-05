@@ -24,6 +24,20 @@ inline std::wstring to_wide(const std::string& utf8) {
     return to_wide(utf8.c_str());
 }
 
+// Convert UTF-16 to UTF-8 for results from Wide API calls
+inline std::string wide_to_utf8(const wchar_t* wide) {
+    if (!wide || !*wide) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string result(len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide, -1, result.data(), len, nullptr, nullptr);
+    return result;
+}
+
+inline std::string wide_to_utf8(const std::wstring& wide) {
+    return wide_to_utf8(wide.c_str());
+}
+
 enum class Lang { kEnglish, kChineseSimplified };
 
 enum class S {
@@ -226,6 +240,11 @@ void InitLanguage();
 Lang GetCurrentLanguage();
 void SetLanguage(Lang lang);
 const char* tr(S id);
+
+// Return translated string as wide for Win32 API calls
+inline std::wstring tr_w(S id) {
+    return to_wide(tr(id));
+}
 
 // Format a translated string with arguments (wraps snprintf)
 template<typename... Args>

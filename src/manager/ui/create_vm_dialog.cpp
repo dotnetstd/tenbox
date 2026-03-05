@@ -13,6 +13,7 @@
 #include <windowsx.h>
 
 #include <atomic>
+#include <iterator>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -82,17 +83,21 @@ struct DialogData {
 
     bool sources_loaded;
     bool loading_sources;
+    std::thread sources_thread;
     int selected_source_index;
 
     std::vector<image_source::ImageEntry> cached_images;
     std::vector<image_source::ImageEntry> online_images;
     bool online_loaded;
     bool loading_online;
+    std::thread online_images_thread;
 
     int selected_index;
     image_source::ImageEntry selected_image;
 
     std::atomic<bool> cancel_download;
+    std::atomic<bool> download_running;
+    std::thread download_thread;
     std::string download_error;
     int current_file_index;
     int total_files;
@@ -107,7 +112,7 @@ struct DialogData {
                    created(false), closed(false),
                    sources_loaded(false), loading_sources(false), selected_source_index(-1),
                    online_loaded(false), loading_online(false),
-                   selected_index(-1), cancel_download(false),
+                   selected_index(-1), cancel_download(false), download_running(false),
                    current_file_index(0), total_files(0),
                    current_downloaded(0), current_total(0),
                    last_progress_ui_tick(0), last_progress_ui_file_index(-1),
@@ -194,7 +199,7 @@ static void ShowPage(DialogData* data, Page page) {
             ? SW_SHOW : SW_HIDE);
         ShowWindow(GetDlgItem(dlg, IDC_BTN_DELETE_CACHE), SW_SHOW);
         EnableWindow(GetDlgItem(dlg, IDC_BTN_DELETE_CACHE), TryGetSelectedCachedImage(data, nullptr));
-        SetWindowTextA(btn_next, i18n::tr(i18n::S::kImgBtnNext));
+        SetWindowTextW(btn_next, i18n::tr_w(i18n::S::kImgBtnNext).c_str());
         EnableWindow(btn_next, data->selected_index >= 0);
         ShowWindow(btn_next, SW_SHOW);
         ShowWindow(btn_back, SW_HIDE);
@@ -207,30 +212,30 @@ static void ShowPage(DialogData* data, Page page) {
         ShowWindow(btn_next, SW_HIDE);
         ShowWindow(btn_back, SW_HIDE);
         SendMessage(GetDlgItem(dlg, IDC_PROGRESS), PBM_SETPOS, 0, 0);
-        SetDlgItemTextA(dlg, IDC_PROGRESS_TEXT, i18n::tr(i18n::S::kImgDownloading));
+        SetDlgItemTextW(dlg, IDC_PROGRESS_TEXT, i18n::tr_w(i18n::S::kImgDownloading).c_str());
         break;
 
     case Page::kConfirm: {
         SetControlsVisible(dlg, confirm_ctrls, 7, true);
-        SetWindowTextA(btn_next, i18n::tr(i18n::S::kDlgBtnCreate));
+        SetWindowTextW(btn_next, i18n::tr_w(i18n::S::kDlgBtnCreate).c_str());
         EnableWindow(btn_next, TRUE);
         ShowWindow(btn_next, SW_SHOW);
         ShowWindow(btn_back, SW_SHOW);
-        SetWindowTextA(btn_back, i18n::tr(i18n::S::kImgBtnBack));
+        SetWindowTextW(btn_back, i18n::tr_w(i18n::S::kImgBtnBack).c_str());
 
         auto records = data->mgr->ListVms();
-        SetDlgItemTextA(dlg, IDC_NAME_EDIT, NextAgentName(records).c_str());
+        SetDlgItemTextW(dlg, IDC_NAME_EDIT, i18n::to_wide(NextAgentName(records)).c_str());
 
         HWND mem_cb = GetDlgItem(dlg, IDC_MEMORY_COMBO);
         SendMessage(mem_cb, CB_RESETCONTENT, 0, 0);
         for (int i = 0; i < kNumOptions; ++i)
-            SendMessageA(mem_cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kMemoryLabels[i]));
+            SendMessageW(mem_cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::to_wide(kMemoryLabels[i]).c_str()));
         SendMessage(mem_cb, CB_SETCURSEL, 2, 0);
 
         HWND cpu_cb = GetDlgItem(dlg, IDC_CPU_COMBO);
         SendMessage(cpu_cb, CB_RESETCONTENT, 0, 0);
         for (int i = 0; i < kNumOptions; ++i)
-            SendMessageA(cpu_cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kCpuLabels[i]));
+            SendMessageW(cpu_cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::to_wide(kCpuLabels[i]).c_str()));
         SendMessage(cpu_cb, CB_SETCURSEL, 2, 0);
 
         CheckDlgButton(dlg, IDC_NAT_CHECK, BST_CHECKED);
@@ -247,7 +252,7 @@ static void RefreshImageList(DialogData* data) {
 
     for (const auto& img : data->cached_images) {
         std::string text = img.display_name + " " + i18n::tr(i18n::S::kImgCached);
-        SendMessageA(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::to_wide(text).c_str()));
         SendMessage(list, LB_SETITEMDATA, index++, 0);
     }
 
@@ -261,7 +266,7 @@ static void RefreshImageList(DialogData* data) {
                 }
             }
             if (!is_cached) {
-                SendMessageA(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(img.display_name.c_str()));
+                SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::to_wide(img.display_name).c_str()));
                 SendMessage(list, LB_SETITEMDATA, index++, 1);
             }
         }
@@ -273,20 +278,20 @@ static void RefreshImageList(DialogData* data) {
 
     HWND status = GetDlgItem(data->dlg, IDC_STATUS_TEXT);
     if (data->loading_sources) {
-        SetWindowTextA(status, i18n::tr(i18n::S::kImgLoadingOnline));
+        SetWindowTextW(status, i18n::tr_w(i18n::S::kImgLoadingOnline).c_str());
     } else if (data->loading_online) {
-        SetWindowTextA(status, i18n::tr(i18n::S::kImgLoadingOnline));
+        SetWindowTextW(status, i18n::tr_w(i18n::S::kImgLoadingOnline).c_str());
     } else if (!data->download_error.empty()) {
-        SetWindowTextA(status, data->download_error.c_str());
+        SetWindowTextW(status, i18n::to_wide(data->download_error).c_str());
     } else {
-        SetWindowTextA(status, "");
+        SetWindowTextW(status, L"");
     }
 }
 
 static void UpdateDescriptionText(DialogData* data) {
     HWND desc_text = GetDlgItem(data->dlg, IDC_DESC_TEXT);
     if (data->selected_index < 0) {
-        SetWindowTextA(desc_text, "");
+        SetWindowTextW(desc_text, L"");
         return;
     }
 
@@ -317,7 +322,7 @@ static void UpdateDescriptionText(DialogData* data) {
         }
     }
 
-    SetWindowTextA(desc_text, description.c_str());
+    SetWindowTextW(desc_text, i18n::to_wide(description).c_str());
 }
 
 static void PopulateSourceCombo(DialogData* data) {
@@ -327,7 +332,7 @@ static void PopulateSourceCombo(DialogData* data) {
     std::lock_guard<std::mutex> lock(g_cache_mutex);
     if (g_sources_loaded) {
         for (const auto& src : g_cached_sources) {
-            SendMessageA(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(src.name.c_str()));
+            SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::to_wide(src.name).c_str()));
         }
         if (!g_cached_sources.empty()) {
             SendMessage(combo, CB_SETCURSEL, 0, 0);
@@ -363,18 +368,21 @@ static void FetchSources(DialogData* data) {
     RefreshImageList(data);
 
     HWND dlg = data->dlg;
-    std::thread([data, dlg]() {
+    if (data->sources_thread.joinable())
+        data->sources_thread.join();
+    data->sources_thread = std::thread([data, dlg]() {
         auto sources_result = http::FetchString(kSourcesUrl);
+        if (data->closed) return;
         if (!sources_result.success) {
             data->download_error = sources_result.error;
-            PostMessage(dlg, WM_SOURCES_COMPLETE, 0, 0);
+            if (!data->closed) PostMessage(dlg, WM_SOURCES_COMPLETE, 0, 0);
             return;
         }
 
         auto sources = image_source::ParseSources(sources_result.data);
         if (sources.empty()) {
             data->download_error = "No sources available";
-            PostMessage(dlg, WM_SOURCES_COMPLETE, 0, 0);
+            if (!data->closed) PostMessage(dlg, WM_SOURCES_COMPLETE, 0, 0);
             return;
         }
 
@@ -383,8 +391,8 @@ static void FetchSources(DialogData* data) {
             g_cached_sources = sources;
             g_sources_loaded = true;
         }
-        PostMessage(dlg, WM_SOURCES_COMPLETE, 1, 0);
-    }).detach();
+        if (!data->closed) PostMessage(dlg, WM_SOURCES_COMPLETE, 1, 0);
+    });
 }
 
 static void FetchOnlineImages(DialogData* data) {
@@ -415,11 +423,14 @@ static void FetchOnlineImages(DialogData* data) {
 
     HWND dlg = data->dlg;
     int source_idx = data->selected_source_index;
-    std::thread([data, dlg, url, source_idx]() {
+    if (data->online_images_thread.joinable())
+        data->online_images_thread.join();
+    data->online_images_thread = std::thread([data, dlg, url, source_idx]() {
         auto images_result = http::FetchString(url);
+        if (data->closed) return;
         if (!images_result.success) {
             data->download_error = images_result.error;
-            PostMessage(dlg, WM_FETCH_COMPLETE, 0, 0);
+            if (!data->closed) PostMessage(dlg, WM_FETCH_COMPLETE, 0, 0);
             return;
         }
 
@@ -433,15 +444,20 @@ static void FetchOnlineImages(DialogData* data) {
             g_online_images_source_index = source_idx;
         }
 
+        if (data->closed) return;
         data->online_images = std::move(filtered);
         PostMessage(dlg, WM_FETCH_COMPLETE, 1, 0);
-    }).detach();
+    });
 }
 
 static void StartDownload(DialogData* data) {
     ShowPage(data, Page::kDownloading);
 
+    if (data->download_thread.joinable())
+        data->download_thread.join();
+
     data->cancel_download = false;
+    data->download_running = true;
     data->download_error.clear();
     data->current_file_index = 0;
     data->total_files = static_cast<int>(data->selected_image.files.size());
@@ -451,18 +467,19 @@ static void StartDownload(DialogData* data) {
     data->last_progress_ui_percent = -1;
 
     HWND dlg = data->dlg;
-    std::thread([data, dlg]() {
+    data->download_thread = std::thread([data, dlg]() {
         std::string cache_dir = image_source::ImageCacheDir(
             data->mgr->data_dir(), data->selected_image);
 
         std::error_code ec;
         fs::create_directories(cache_dir, ec);
 
+        bool success = true;
         for (size_t i = 0; i < data->selected_image.files.size(); ++i) {
             if (data->cancel_download) {
                 data->download_error = "Cancelled";
-                PostMessage(dlg, WM_DOWNLOAD_COMPLETE, 0, 0);
-                return;
+                success = false;
+                break;
             }
 
             const auto& file = data->selected_image.files[i];
@@ -472,27 +489,33 @@ static void StartDownload(DialogData* data) {
             data->current_file_name = file.name;
             data->current_downloaded = 0;
             data->current_total = 0;
-            PostMessage(dlg, WM_DOWNLOAD_PROGRESS, 0, 0);
+            if (!data->cancel_download)
+                PostMessage(dlg, WM_DOWNLOAD_PROGRESS, 0, 0);
 
             auto result = http::DownloadFile(
                 file.url, dest, file.sha256,
                 [data, dlg](uint64_t downloaded, uint64_t total) {
                     data->current_downloaded = downloaded;
                     data->current_total = total;
-                    PostMessage(dlg, WM_DOWNLOAD_PROGRESS, 0, 0);
+                    if (!data->cancel_download)
+                        PostMessage(dlg, WM_DOWNLOAD_PROGRESS, 0, 0);
                 },
                 &data->cancel_download);
 
             if (!result.success) {
                 data->download_error = file.name + ": " + result.error;
-                PostMessage(dlg, WM_DOWNLOAD_COMPLETE, 0, 0);
-                return;
+                success = false;
+                break;
             }
         }
 
-        image_source::SaveImageMeta(cache_dir, data->selected_image);
-        PostMessage(dlg, WM_DOWNLOAD_COMPLETE, 1, 0);
-    }).detach();
+        if (success)
+            image_source::SaveImageMeta(cache_dir, data->selected_image);
+
+        data->download_running = false;
+        if (!data->closed)
+            PostMessage(dlg, WM_DOWNLOAD_COMPLETE, success ? 1 : 0, 0);
+    });
 }
 
 static LRESULT CALLBACK DlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp,
@@ -564,7 +587,7 @@ static LRESULT CALLBACK DlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
         } else if (data->current_downloaded > 0) {
             text += " (" + FormatSize(data->current_downloaded) + ")";
         }
-        SetDlgItemTextA(dlg, IDC_PROGRESS_TEXT, text.c_str());
+        SetDlgItemTextW(dlg, IDC_PROGRESS_TEXT, i18n::to_wide(text).c_str());
         return 0;
     }
 
@@ -574,7 +597,7 @@ static LRESULT CALLBACK DlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
             ShowPage(data, Page::kConfirm);
         } else {
             if (!data->download_error.empty() && data->download_error != "Cancelled") {
-                MessageBoxA(dlg, data->download_error.c_str(), i18n::tr(i18n::S::kError), MB_OK | MB_ICONERROR);
+                MessageBoxW(dlg, i18n::to_wide(data->download_error).c_str(), i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONERROR);
             }
             ShowPage(data, Page::kSelectImage);
         }
@@ -659,8 +682,8 @@ static LRESULT CALLBACK DlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
             char confirm_buf[512];
             snprintf(confirm_buf, sizeof(confirm_buf),
                 i18n::tr(i18n::S::kImgConfirmDeleteCacheMsg), cached_img.display_name.c_str());
-            int ans = MessageBoxA(dlg, confirm_buf,
-                i18n::tr(i18n::S::kImgConfirmDeleteCacheTitle),
+            int ans = MessageBoxW(dlg, i18n::to_wide(confirm_buf).c_str(),
+                i18n::tr_w(i18n::S::kImgConfirmDeleteCacheTitle).c_str(),
                 MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
             if (ans != IDYES) return 0;
 
@@ -669,7 +692,7 @@ static LRESULT CALLBACK DlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
             fs::remove_all(cache_dir, ec);
             if (ec) {
                 std::string err = i18n::fmt(i18n::S::kImgCacheDeleteFailed, ec.message().c_str());
-                MessageBoxA(dlg, err.c_str(), i18n::tr(i18n::S::kError), MB_OK | MB_ICONERROR);
+                MessageBoxW(dlg, i18n::to_wide(err).c_str(), i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONERROR);
                 return 0;
             }
 
@@ -679,7 +702,7 @@ static LRESULT CALLBACK DlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
             UpdateDescriptionText(data);
             EnableWindow(GetDlgItem(dlg, IDC_BTN_NEXT), FALSE);
             EnableWindow(GetDlgItem(dlg, IDC_BTN_DELETE_CACHE), FALSE);
-            SetWindowTextA(GetDlgItem(dlg, IDC_STATUS_TEXT), i18n::tr(i18n::S::kImgCacheDeleted));
+            SetWindowTextW(GetDlgItem(dlg, IDC_STATUS_TEXT), i18n::tr_w(i18n::S::kImgCacheDeleted).c_str());
             return 0;
         }
 
@@ -737,8 +760,9 @@ static LRESULT CALLBACK DlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
             } else if (data->current_page == Page::kDownloading) {
                 data->cancel_download = true;
             } else if (data->current_page == Page::kConfirm) {
-                char name_buf[256]{};
-                GetDlgItemTextA(dlg, IDC_NAME_EDIT, name_buf, sizeof(name_buf));
+                wchar_t name_buf[256]{};
+                GetDlgItemTextW(dlg, IDC_NAME_EDIT, name_buf, static_cast<int>(std::size(name_buf)));
+                std::string req_name = i18n::wide_to_utf8(name_buf);
 
                 int mem_idx = static_cast<int>(SendMessage(GetDlgItem(dlg, IDC_MEMORY_COMBO), CB_GETCURSEL, 0, 0));
                 int cpu_idx = static_cast<int>(SendMessage(GetDlgItem(dlg, IDC_CPU_COMBO), CB_GETCURSEL, 0, 0));
@@ -747,7 +771,7 @@ static LRESULT CALLBACK DlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
                     data->mgr->data_dir(), data->selected_image);
 
                 VmCreateRequest req;
-                req.name = name_buf;
+                req.name = req_name;
                 req.memory_mb = (mem_idx >= 0 && mem_idx < kNumOptions) ? kMemoryOptionsMb[mem_idx] : 4096;
                 req.cpu_count = (cpu_idx >= 0 && cpu_idx < kNumOptions) ? kCpuOptions[cpu_idx] : 4;
                 req.nat_enabled = IsDlgButtonChecked(dlg, IDC_NAT_CHECK) == BST_CHECKED;
@@ -767,7 +791,7 @@ static LRESULT CALLBACK DlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
 
                 auto v = ValidateCreateRequest(req);
                 if (!v.ok) {
-                    MessageBoxA(dlg, v.message.c_str(), i18n::tr(i18n::S::kValidationError), MB_OK | MB_ICONWARNING);
+                    MessageBoxW(dlg, i18n::to_wide(v.message).c_str(), i18n::tr_w(i18n::S::kValidationError).c_str(), MB_OK | MB_ICONWARNING);
                     return 0;
                 }
 
@@ -777,7 +801,7 @@ static LRESULT CALLBACK DlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
                     data->closed = true;
                     DestroyWindow(dlg);
                 } else {
-                    MessageBoxA(dlg, error.c_str(), i18n::tr(i18n::S::kError), MB_OK | MB_ICONERROR);
+                    MessageBoxW(dlg, i18n::to_wide(error).c_str(), i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONERROR);
                 }
             }
             return 0;
@@ -800,22 +824,22 @@ static LRESULT CALLBACK DlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
     return DefSubclassProc(dlg, msg, wp, lp);
 }
 
-static const char* kDialogClassName = "TenBoxCreateVmDlg";
+static const wchar_t* kDialogClassName = L"TenBoxCreateVmDlg";
 static bool g_class_registered = false;
 
 static void RegisterDialogClass() {
     if (g_class_registered) return;
 
-    WNDCLASSEXA wc{};
+    WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = DefWindowProcA;
+    wc.lpfnWndProc = DefWindowProcW;
     wc.hInstance = GetModuleHandle(nullptr);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     wc.lpszClassName = kDialogClassName;
 
-    RegisterClassExA(&wc);
+    RegisterClassExW(&wc);
     g_class_registered = true;
 }
 
@@ -847,9 +871,9 @@ bool ShowCreateVmDialog2(HWND parent, ManagerService& mgr, std::string* error) {
     int x = parent_rect.left + (pw - dlg_w) / 2;
     int y = parent_rect.top + (ph - dlg_h) / 2;
 
-    HWND dlg = CreateWindowExA(
+    HWND dlg = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
-        kDialogClassName, i18n::tr(i18n::S::kDlgCreateVm),
+        kDialogClassName, i18n::tr_w(i18n::S::kDlgCreateVm).c_str(),
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         x, y, dlg_w, dlg_h,
         parent, nullptr, GetModuleHandle(nullptr), nullptr);
@@ -894,44 +918,44 @@ bool ShowCreateVmDialog2(HWND parent, ManagerService& mgr, std::string* error) {
     if (list_h < scale_px(120)) list_h = scale_px(120);
 
     int top_ctrl_y = margin + (row_h - btn_h) / 2;
-    CreateWindowExA(0, "STATIC", i18n::tr(i18n::S::kImgSource),
+    CreateWindowExW(0, L"STATIC", i18n::tr_w(i18n::S::kImgSource).c_str(),
         WS_CHILD | SS_LEFT | SS_CENTERIMAGE, margin, margin, source_label_w, row_h,
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_SOURCE_LABEL)), nullptr, nullptr);
 
     int combo_x = margin + source_label_w + scale_px(6);
     int combo_w = w - combo_x - margin - load_btn_w - scale_px(10);
-    CreateWindowExA(0, "COMBOBOX", "",
+    CreateWindowExW(0, L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         combo_x, top_ctrl_y, combo_w, 200,
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_SOURCE_COMBO)), nullptr, nullptr);
 
-    CreateWindowExA(0, "BUTTON", i18n::tr(i18n::S::kImgBtnRefresh),
+    CreateWindowExW(0, L"BUTTON", i18n::tr_w(i18n::S::kImgBtnRefresh).c_str(),
         WS_CHILD | BS_PUSHBUTTON,
         w - margin - load_btn_w, top_ctrl_y, load_btn_w, btn_h,
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_BTN_LOAD)), nullptr, nullptr);
 
-    CreateWindowExA(WS_EX_CLIENTEDGE, "LISTBOX", "",
+    CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
         WS_CHILD | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
         margin, list_top, w - 2 * margin, list_h,
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_IMAGE_LIST)), nullptr, nullptr);
 
-    CreateWindowExA(0, "STATIC", "",
+    CreateWindowExW(0, L"STATIC", L"",
         WS_CHILD | SS_LEFT,
         margin, list_top + list_h + scale_px(6), w - 2 * margin, desc_h,
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_DESC_TEXT)), nullptr, nullptr);
 
-    CreateWindowExA(0, "STATIC", "",
+    CreateWindowExW(0, L"STATIC", L"",
         WS_CHILD | SS_LEFT,
         margin, status_y, w - 2 * margin, scale_px(22),
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_STATUS_TEXT)), nullptr, nullptr);
 
-    CreateWindowExA(0, PROGRESS_CLASSA, "",
+    CreateWindowExW(0, PROGRESS_CLASSW, L"",
         WS_CHILD | PBS_SMOOTH,
         margin, margin + scale_px(58), w - 2 * margin, scale_px(24),
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_PROGRESS)), nullptr, nullptr);
     SendMessage(GetDlgItem(dlg, IDC_PROGRESS), PBM_SETRANGE, 0, MAKELPARAM(0, 100));
 
-    CreateWindowExA(0, "STATIC", "",
+    CreateWindowExW(0, L"STATIC", L"",
         WS_CHILD | SS_LEFT,
         margin, margin + scale_px(92), w - 2 * margin, scale_px(48),
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_PROGRESS_TEXT)), nullptr, nullptr);
@@ -942,31 +966,31 @@ bool ShowCreateVmDialog2(HWND parent, ManagerService& mgr, std::string* error) {
     int edit_h = scale_px(26);
     int combo_drop_h = scale_px(220);
     int ctrl_y = margin;
-    CreateWindowExA(0, "STATIC", i18n::tr(i18n::S::kDlgLabelName),
+    CreateWindowExW(0, L"STATIC", i18n::tr_w(i18n::S::kDlgLabelName).c_str(),
         WS_CHILD | SS_LEFT, margin, ctrl_y + label_y_off, label_w, scale_px(20),
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_NAME_LABEL)), nullptr, nullptr);
-    CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+    CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | ES_AUTOHSCROLL, edit_x, ctrl_y, edit_w, edit_h,
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_NAME_EDIT)), nullptr, nullptr);
     ctrl_y += form_row_h;
 
-    CreateWindowExA(0, "STATIC", i18n::tr(i18n::S::kDlgLabelMemory),
+    CreateWindowExW(0, L"STATIC", i18n::tr_w(i18n::S::kDlgLabelMemory).c_str(),
         WS_CHILD | SS_LEFT, margin, ctrl_y + label_y_off, label_w, scale_px(20),
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_MEMORY_LABEL)), nullptr, nullptr);
-    CreateWindowExA(0, "COMBOBOX", "",
+    CreateWindowExW(0, L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL, edit_x, ctrl_y, edit_w, combo_drop_h,
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_MEMORY_COMBO)), nullptr, nullptr);
     ctrl_y += form_row_h;
 
-    CreateWindowExA(0, "STATIC", i18n::tr(i18n::S::kDlgLabelVcpus),
+    CreateWindowExW(0, L"STATIC", i18n::tr_w(i18n::S::kDlgLabelVcpus).c_str(),
         WS_CHILD | SS_LEFT, margin, ctrl_y + label_y_off, label_w, scale_px(20),
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_CPU_LABEL)), nullptr, nullptr);
-    CreateWindowExA(0, "COMBOBOX", "",
+    CreateWindowExW(0, L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL, edit_x, ctrl_y, edit_w, combo_drop_h,
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_CPU_COMBO)), nullptr, nullptr);
     ctrl_y += form_row_h;
 
-    CreateWindowExA(0, "BUTTON", i18n::tr(i18n::S::kDlgEnableNat),
+    CreateWindowExW(0, L"BUTTON", i18n::tr_w(i18n::S::kDlgEnableNat).c_str(),
         WS_CHILD | BS_AUTOCHECKBOX, edit_x, ctrl_y + scale_px(4), edit_w, scale_px(22),
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_NAT_CHECK)), nullptr, nullptr);
 
@@ -979,29 +1003,29 @@ bool ShowCreateVmDialog2(HWND parent, ManagerService& mgr, std::string* error) {
     int retry_x = w - margin - btn_w;
     int delete_x = margin;
 
-    CreateWindowExA(0, "BUTTON", i18n::tr(i18n::S::kImgBtnDeleteCache),
+    CreateWindowExW(0, L"BUTTON", i18n::tr_w(i18n::S::kImgBtnDeleteCache).c_str(),
         WS_CHILD | BS_PUSHBUTTON, delete_x, bottom_btns_y, secondary_btn_w, btn_h,
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_BTN_DELETE_CACHE)), nullptr, nullptr);
-    CreateWindowExA(0, "BUTTON", i18n::tr(i18n::S::kImgBtnRetry),
+    CreateWindowExW(0, L"BUTTON", i18n::tr_w(i18n::S::kImgBtnRetry).c_str(),
         WS_CHILD | BS_PUSHBUTTON, retry_x, status_y - scale_px(6) - btn_h, btn_w, btn_h,
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_BTN_RETRY)), nullptr, nullptr);
 
-    CreateWindowExA(0, "BUTTON", i18n::tr(i18n::S::kImgBtnBack),
+    CreateWindowExW(0, L"BUTTON", i18n::tr_w(i18n::S::kImgBtnBack).c_str(),
         WS_CHILD | BS_PUSHBUTTON, w - margin - 2 * btn_w - btn_gap, bottom_btns_y, btn_w, btn_h,
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_BTN_BACK)), nullptr, nullptr);
 
-    CreateWindowExA(0, "BUTTON", i18n::tr(i18n::S::kImgBtnNext),
+    CreateWindowExW(0, L"BUTTON", i18n::tr_w(i18n::S::kImgBtnNext).c_str(),
         WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, w - margin - btn_w, bottom_btns_y, btn_w, btn_h,
         dlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_BTN_NEXT)), nullptr, nullptr);
 
     HFONT ui_font = nullptr;
-    NONCLIENTMETRICSA ncm{};
+    NONCLIENTMETRICSW ncm{};
     ncm.cbSize = sizeof(ncm);
-    if (SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) {
-        LOGFONTA lf = ncm.lfMessageFont;
+    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) {
+        LOGFONTW lf = ncm.lfMessageFont;
         // Use a slightly larger message font for this custom dialog.
         lf.lfHeight = -MulDiv(10, static_cast<int>(dpi), 72);
-        ui_font = CreateFontIndirectA(&lf);
+        ui_font = CreateFontIndirectW(&lf);
     }
     if (!ui_font) {
         ui_font = reinterpret_cast<HFONT>(SendMessage(parent, WM_GETFONT, 0, 0));
@@ -1041,6 +1065,14 @@ bool ShowCreateVmDialog2(HWND parent, ManagerService& mgr, std::string* error) {
             DispatchMessage(&msg);
         }
     }
+
+    data.cancel_download = true;
+    if (data.download_thread.joinable())
+        data.download_thread.join();
+    if (data.sources_thread.joinable())
+        data.sources_thread.join();
+    if (data.online_images_thread.joinable())
+        data.online_images_thread.join();
 
     // Delete only if we created a private font object.
     if (ui_font && ui_font != reinterpret_cast<HFONT>(SendMessage(parent, WM_GETFONT, 0, 0))

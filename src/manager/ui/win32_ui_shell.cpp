@@ -202,11 +202,11 @@ static void BlitFrameToState(VmUiState& state, const DisplayFrame& frame) {
 
 // ── Window class registration ──
 
-static const char* kWndClass = "TenBoxManagerWin32";
+static const wchar_t* kWndClass = L"TenBoxManagerWin32";
 static LRESULT CALLBACK MainWndProc(HWND, UINT, WPARAM, LPARAM);
 
 static ATOM RegisterMainClass(HINSTANCE hinst) {
-    WNDCLASSEXA wc{};
+    WNDCLASSEXW wc{};
     wc.cbSize        = sizeof(wc);
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = MainWndProc;
@@ -214,13 +214,13 @@ static ATOM RegisterMainClass(HINSTANCE hinst) {
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = kWndClass;
-    wc.hIcon         = static_cast<HICON>(LoadImageA(hinst, MAKEINTRESOURCEA(IDI_APP_ICON),
+    wc.hIcon         = static_cast<HICON>(LoadImageW(hinst, MAKEINTRESOURCEW(IDI_APP_ICON),
                            IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED));
-    wc.hIconSm       = static_cast<HICON>(LoadImageA(hinst, MAKEINTRESOURCEA(IDI_APP_ICON),
+    wc.hIconSm       = static_cast<HICON>(LoadImageW(hinst, MAKEINTRESOURCEW(IDI_APP_ICON),
                            IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
                            GetSystemMetrics(SM_CYSMICON), LR_SHARED));
     if (!wc.hIcon) wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
-    return RegisterClassExA(&wc);
+    return RegisterClassExW(&wc);
 }
 
 // ── Menu building ──
@@ -230,38 +230,38 @@ static HMENU BuildMenuBar(bool show_toolbar, bool adaptive_display) {
     HMENU bar = CreateMenu();
 
     HMENU file_menu = CreatePopupMenu();
-    AppendMenuA(file_menu, MF_STRING, IDM_NEW_VM, i18n::tr(S::kMenuNewVm));
-    AppendMenuA(file_menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(file_menu, MF_STRING, IDM_EXIT, i18n::tr(S::kMenuExit));
-    AppendMenuA(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file_menu), i18n::tr(S::kMenuManager));
+    AppendMenuW(file_menu, MF_STRING, IDM_NEW_VM, i18n::tr_w(S::kMenuNewVm).c_str());
+    AppendMenuW(file_menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file_menu, MF_STRING, IDM_EXIT, i18n::tr_w(S::kMenuExit).c_str());
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file_menu), i18n::tr_w(S::kMenuManager).c_str());
 
     HMENU vm_menu = CreatePopupMenu();
-    AppendMenuA(vm_menu, MF_STRING, IDM_EDIT,     i18n::tr(S::kMenuEdit));
-    AppendMenuA(vm_menu, MF_STRING, IDM_CLONE,    i18n::tr(S::kMenuClone));
-    AppendMenuA(vm_menu, MF_STRING, IDM_DELETE,   i18n::tr(S::kMenuDelete));
-    AppendMenuA(vm_menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(vm_menu, MF_STRING, IDM_START,    i18n::tr(S::kMenuStart));
-    AppendMenuA(vm_menu, MF_STRING, IDM_STOP,     i18n::tr(S::kMenuStop));
-    AppendMenuA(vm_menu, MF_STRING, IDM_REBOOT,   i18n::tr(S::kMenuReboot));
-    AppendMenuA(vm_menu, MF_STRING, IDM_SHUTDOWN, i18n::tr(S::kMenuShutdown));
-    AppendMenuA(vm_menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(vm_menu, MF_STRING, IDM_SHARED_FOLDERS, i18n::tr(S::kToolbarSharedFolders));
-    AppendMenuA(vm_menu, MF_STRING, IDM_PORT_FORWARDS, i18n::tr(S::kMenuPortForwards));
-    AppendMenuA(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(vm_menu), i18n::tr(S::kMenuVm));
+    AppendMenuW(vm_menu, MF_STRING, IDM_EDIT,     i18n::tr_w(S::kMenuEdit).c_str());
+    AppendMenuW(vm_menu, MF_STRING, IDM_CLONE,    i18n::tr_w(S::kMenuClone).c_str());
+    AppendMenuW(vm_menu, MF_STRING, IDM_DELETE,   i18n::tr_w(S::kMenuDelete).c_str());
+    AppendMenuW(vm_menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(vm_menu, MF_STRING, IDM_START,    i18n::tr_w(S::kMenuStart).c_str());
+    AppendMenuW(vm_menu, MF_STRING, IDM_STOP,     i18n::tr_w(S::kMenuStop).c_str());
+    AppendMenuW(vm_menu, MF_STRING, IDM_REBOOT,   i18n::tr_w(S::kMenuReboot).c_str());
+    AppendMenuW(vm_menu, MF_STRING, IDM_SHUTDOWN, i18n::tr_w(S::kMenuShutdown).c_str());
+    AppendMenuW(vm_menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(vm_menu, MF_STRING, IDM_SHARED_FOLDERS, i18n::tr_w(S::kToolbarSharedFolders).c_str());
+    AppendMenuW(vm_menu, MF_STRING, IDM_PORT_FORWARDS, i18n::tr_w(S::kMenuPortForwards).c_str());
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(vm_menu), i18n::tr_w(S::kMenuVm).c_str());
 
     HMENU view_menu = CreatePopupMenu();
-    AppendMenuA(view_menu, MF_STRING | (show_toolbar ? MF_CHECKED : MF_UNCHECKED),
-               IDM_VIEW_TOOLBAR, i18n::tr(S::kMenuViewToolbar));
-    AppendMenuA(view_menu, MF_STRING | (adaptive_display ? MF_CHECKED : MF_UNCHECKED),
-               IDM_VIEW_ADAPTIVE_DISPLAY, i18n::tr(S::kMenuViewAdaptiveDisplay));
-    AppendMenuA(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view_menu), i18n::tr(S::kMenuView));
+    AppendMenuW(view_menu, MF_STRING | (show_toolbar ? MF_CHECKED : MF_UNCHECKED),
+               IDM_VIEW_TOOLBAR, i18n::tr_w(S::kMenuViewToolbar).c_str());
+    AppendMenuW(view_menu, MF_STRING | (adaptive_display ? MF_CHECKED : MF_UNCHECKED),
+               IDM_VIEW_ADAPTIVE_DISPLAY, i18n::tr_w(S::kMenuViewAdaptiveDisplay).c_str());
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view_menu), i18n::tr_w(S::kMenuView).c_str());
 
     HMENU help_menu = CreatePopupMenu();
-    AppendMenuA(help_menu, MF_STRING, IDM_WEBSITE,      i18n::tr(S::kMenuWebsite));
-    AppendMenuA(help_menu, MF_STRING, IDM_CHECK_UPDATE,  i18n::tr(S::kMenuCheckUpdate));
-    AppendMenuA(help_menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(help_menu, MF_STRING, IDM_ABOUT,        i18n::tr(S::kMenuAbout));
-    AppendMenuA(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help_menu), i18n::tr(S::kMenuHelp));
+    AppendMenuW(help_menu, MF_STRING, IDM_WEBSITE,      i18n::tr_w(S::kMenuWebsite).c_str());
+    AppendMenuW(help_menu, MF_STRING, IDM_CHECK_UPDATE,  i18n::tr_w(S::kMenuCheckUpdate).c_str());
+    AppendMenuW(help_menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(help_menu, MF_STRING, IDM_ABOUT,        i18n::tr_w(S::kMenuAbout).c_str());
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help_menu), i18n::tr_w(S::kMenuHelp).c_str());
 
     return bar;
 }
@@ -289,8 +289,8 @@ static HIMAGELIST CreateToolbarImageList(HINSTANCE hinst) {
     if (!hil) return nullptr;
 
     for (UINT id : bmp_ids) {
-        HBITMAP hbm = static_cast<HBITMAP>(LoadImageA(
-            hinst, MAKEINTRESOURCEA(id), IMAGE_BITMAP,
+        HBITMAP hbm = static_cast<HBITMAP>(LoadImageW(
+            hinst, MAKEINTRESOURCEW(id), IMAGE_BITMAP,
             kToolbarIconSize, kToolbarIconSize, LR_CREATEDIBSECTION));
         if (hbm) {
             ImageList_AddMasked(hil, hbm, RGB(255, 0, 255));
@@ -304,7 +304,7 @@ static HIMAGELIST CreateToolbarImageList(HINSTANCE hinst) {
 }
 
 static HWND CreateToolbar(HWND parent, HINSTANCE hinst) {
-    HWND tb = CreateWindowExA(0, TOOLBARCLASSNAMEA, nullptr,
+    HWND tb = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr,
         WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | CCS_TOP,
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(IDC_TOOLBAR), hinst, nullptr);
 
@@ -334,7 +334,13 @@ static HWND CreateToolbar(HWND parent, HINSTANCE hinst) {
         {IDM_PORT_FORWARDS, i18n::tr(S::kToolbarPortForwards),   8},
     };
 
+    std::vector<std::wstring> wtexts;
+    wtexts.reserve(std::size(items));
     for (const auto& item : items) {
+        wtexts.push_back(item.text ? i18n::to_wide(item.text) : std::wstring());
+    }
+    for (size_t i = 0; i < std::size(items); i++) {
+        const auto& item = items[i];
         TBBUTTON btn{};
         if (item.id == 0) {
             btn.fsStyle = BTNS_SEP;
@@ -343,9 +349,9 @@ static HWND CreateToolbar(HWND parent, HINSTANCE hinst) {
             btn.idCommand = item.id;
             btn.fsState   = TBSTATE_ENABLED;
             btn.fsStyle   = BTNS_BUTTON | BTNS_AUTOSIZE;
-            btn.iString   = reinterpret_cast<INT_PTR>(item.text);
+            btn.iString   = reinterpret_cast<INT_PTR>(wtexts[i].c_str());
         }
-        SendMessageA(tb, TB_ADDBUTTONSA, 1, reinterpret_cast<LPARAM>(&btn));
+        SendMessageW(tb, TB_ADDBUTTONSW, 1, reinterpret_cast<LPARAM>(&btn));
     }
 
     SendMessage(tb, TB_AUTOSIZE, 0, 0);
@@ -373,8 +379,8 @@ static int GetBadgeCount(Impl* p, UINT cmd_id) {
 static void DrawToolbarBadge(HDC hdc, const RECT& btn_rect, int count) {
     if (count <= 0) return;
 
-    char text[8];
-    _snprintf_s(text, sizeof(text), _TRUNCATE, "%d", count);
+    wchar_t text[8];
+    swprintf_s(text, L"%d", count);
 
     int radius = 12;
     int cx = btn_rect.right - 18;
@@ -392,16 +398,16 @@ static void DrawToolbarBadge(HDC hdc, const RECT& btn_rect, int count) {
     DeleteObject(brush);
     DeleteObject(pen);
 
-    HFONT badge_font = CreateFontA(-16, 0, 0, 0, FW_BOLD,
+    HFONT badge_font = CreateFontW(-16, 0, 0, 0, FW_BOLD,
         FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_SWISS, "Segoe UI");
+        DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     HFONT old_font = static_cast<HFONT>(SelectObject(hdc, badge_font));
     SetTextColor(hdc, RGB(255, 255, 255));
     SetBkMode(hdc, TRANSPARENT);
 
     RECT text_rect = { cx - radius, cy - radius, cx + radius, cy + radius };
-    DrawTextA(hdc, text, -1, &text_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, text, -1, &text_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     SelectObject(hdc, old_font);
     DeleteObject(badge_font);
@@ -622,9 +628,9 @@ static bool HitTestSplitter(Impl* p, int client_x) {
 
 static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* shell = g_shell;
-    if (!shell) return DefWindowProcA(hwnd, msg, wp, lp);
+    if (!shell) return DefWindowProcW(hwnd, msg, wp, lp);
     auto* p = reinterpret_cast<Impl*>(
-        GetWindowLongPtrA(hwnd, GWLP_USERDATA));
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
     switch (msg) {
     case WM_SIZE:
@@ -680,15 +686,15 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         // Console send button
         if (cmd == ConsoleTab::kSendBtnId && code == BN_CLICKED) {
-            char buf[1024]{};
-            GetWindowTextA(p->console_tab.input_handle(), buf, sizeof(buf));
-            std::string input(buf);
+            wchar_t buf[1024]{};
+            GetWindowTextW(p->console_tab.input_handle(), buf, static_cast<int>(std::size(buf)));
+            std::string input = i18n::wide_to_utf8(buf);
             if (!input.empty() && p->selected_index >= 0 &&
                 p->selected_index < static_cast<int>(p->records.size())) {
                 std::string vm_id = p->records[p->selected_index].spec.vm_id;
                 std::string to_send = input + "\n";
                 if (shell->manager_.SendConsoleInput(vm_id, to_send)) {
-                    SetWindowTextA(p->console_tab.input_handle(), "");
+                    SetWindowTextW(p->console_tab.input_handle(), L"");
                 }
             }
             return 0;
@@ -700,16 +706,22 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (ShowCreateVmDialog2(hwnd, shell->manager_, &error)) {
                 shell->RefreshVmList();
             } else if (!error.empty()) {
-                MessageBoxA(hwnd, error.c_str(), i18n::tr(i18n::S::kError), MB_OK | MB_ICONERROR);
+                MessageBoxW(hwnd, i18n::to_wide(error).c_str(), i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONERROR);
             }
             return 0;
         }
         case IDM_EXIT:
             SendMessage(hwnd, WM_CLOSE, 0, 0);
             return 0;
-        case IDM_WEBSITE:
-            ShellExecuteA(hwnd, "open", "https://tenbox.ai/", nullptr, nullptr, SW_SHOWNORMAL);
+        case IDM_WEBSITE: {
+            SHELLEXECUTEINFOW sei{sizeof(sei)};
+            sei.hwnd = hwnd;
+            sei.lpVerb = L"open";
+            sei.lpFile = L"https://tenbox.ai/";
+            sei.nShow = SW_SHOWNORMAL;
+            ShellExecuteExW(&sei);
             return 0;
+        }
         case IDM_CHECK_UPDATE: {
             if (p->update_check_done && p->pending_update.update_available) {
                 if (ShowUpdateDialog(hwnd, p->pending_update)) {
@@ -724,15 +736,15 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         PostQuitMessage(0);
                     }
                 } else {
-                    MessageBoxA(hwnd, i18n::tr(i18n::S::kUpdateLatest),
-                        i18n::tr(i18n::S::kMenuCheckUpdate), MB_OK | MB_ICONINFORMATION);
+                    MessageBoxW(hwnd, i18n::tr_w(i18n::S::kUpdateLatest).c_str(),
+                        i18n::tr_w(i18n::S::kMenuCheckUpdate).c_str(), MB_OK | MB_ICONINFORMATION);
                 }
             }
             return 0;
         }
         case IDM_ABOUT:
-            MessageBoxA(hwnd, i18n::tr(i18n::S::kAboutText),
-                i18n::tr(i18n::S::kAboutTitle), MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(hwnd, i18n::tr_w(i18n::S::kAboutText).c_str(),
+                i18n::tr_w(i18n::S::kAboutTitle).c_str(), MB_OK | MB_ICONINFORMATION);
             return 0;
         case IDM_START: {
             if (p->selected_index < 0 ||
@@ -750,17 +762,17 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SendMessage(p->tab, TCM_SETCURSEL, kTabConsole, 0);
             LayoutControls(p);
             auto status = i18n::fmt(i18n::S::kStatusStarting, vm_id.c_str());
-            SendMessageA(p->statusbar, SB_SETTEXTA, 0, reinterpret_cast<LPARAM>(status.c_str()));
+            SendMessageW(p->statusbar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(i18n::to_wide(status).c_str()));
             std::string error;
             bool ok = shell->manager_.StartVm(vm_id, &error);
             shell->RefreshVmList();
             if (ok) {
                 status = i18n::fmt(i18n::S::kStatusStarted, vm_id.c_str());
-                SendMessageA(p->statusbar, SB_SETTEXTA, 0, reinterpret_cast<LPARAM>(status.c_str()));
+                SendMessageW(p->statusbar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(i18n::to_wide(status).c_str()));
             } else {
                 status = std::string(i18n::tr(i18n::S::kStatusErrorPrefix)) + error;
-                SendMessageA(p->statusbar, SB_SETTEXTA, 0, reinterpret_cast<LPARAM>(status.c_str()));
-                MessageBoxA(hwnd, error.c_str(), i18n::tr(i18n::S::kError), MB_OK | MB_ICONERROR);
+                SendMessageW(p->statusbar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(i18n::to_wide(status).c_str()));
+                MessageBoxW(hwnd, i18n::to_wide(error).c_str(), i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONERROR);
             }
             return 0;
         }
@@ -771,7 +783,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::string vm_id = p->records[p->selected_index].spec.vm_id;
             std::string vm_name = p->records[p->selected_index].spec.name;
             auto prompt = i18n::fmt(i18n::S::kConfirmForceStopMsg, vm_name.c_str());
-            if (MessageBoxA(hwnd, prompt.c_str(), i18n::tr(i18n::S::kConfirmForceStopTitle),
+            if (MessageBoxW(hwnd, i18n::to_wide(prompt).c_str(), i18n::tr_w(i18n::S::kConfirmForceStopTitle).c_str(),
                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
                 return 0;
             }
@@ -780,7 +792,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             shell->RefreshVmList();
             auto status = ok ? i18n::fmt(i18n::S::kStatusStopped, vm_id.c_str())
                              : (std::string(i18n::tr(i18n::S::kStatusErrorPrefix)) + error);
-            SendMessageA(p->statusbar, SB_SETTEXTA, 0, reinterpret_cast<LPARAM>(status.c_str()));
+            SendMessageW(p->statusbar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(i18n::to_wide(status).c_str()));
             return 0;
         }
         case IDM_REBOOT: {
@@ -793,7 +805,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             shell->RefreshVmList();
             auto status = ok ? i18n::fmt(i18n::S::kStatusRebooted, vm_id.c_str())
                              : (std::string(i18n::tr(i18n::S::kStatusErrorPrefix)) + error);
-            SendMessageA(p->statusbar, SB_SETTEXTA, 0, reinterpret_cast<LPARAM>(status.c_str()));
+            SendMessageW(p->statusbar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(i18n::to_wide(status).c_str()));
             return 0;
         }
         case IDM_SHUTDOWN: {
@@ -806,7 +818,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             shell->RefreshVmList();
             auto status = ok ? i18n::fmt(i18n::S::kStatusShuttingDown, vm_id.c_str())
                              : (std::string(i18n::tr(i18n::S::kStatusErrorPrefix)) + error);
-            SendMessageA(p->statusbar, SB_SETTEXTA, 0, reinterpret_cast<LPARAM>(status.c_str()));
+            SendMessageW(p->statusbar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(i18n::to_wide(status).c_str()));
             return 0;
         }
         case IDM_SHARED_FOLDERS: {
@@ -867,9 +879,9 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (ShowEditVmDialog(hwnd, shell->manager_, rec, &error)) {
                 shell->RefreshVmList();
                 auto status = i18n::fmt(i18n::S::kStatusVmUpdated, vm_name.c_str());
-                SendMessageA(p->statusbar, SB_SETTEXTA, 0, reinterpret_cast<LPARAM>(status.c_str()));
+                SendMessageW(p->statusbar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(i18n::to_wide(status).c_str()));
             } else if (!error.empty()) {
-                MessageBoxA(hwnd, error.c_str(), i18n::tr(i18n::S::kError), MB_OK | MB_ICONERROR);
+                MessageBoxW(hwnd, i18n::to_wide(error).c_str(), i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONERROR);
             }
             return 0;
         }
@@ -880,16 +892,16 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::string vm_id   = p->records[p->selected_index].spec.vm_id;
             std::string vm_name = p->records[p->selected_index].spec.name;
             auto status_msg = i18n::fmt(i18n::S::kStatusVmCloning, vm_name.c_str());
-            SendMessageA(p->statusbar, SB_SETTEXTA, 0,
-                reinterpret_cast<LPARAM>(status_msg.c_str()));
+            SendMessageW(p->statusbar, SB_SETTEXTW, 0,
+                reinterpret_cast<LPARAM>(i18n::to_wide(status_msg).c_str()));
             std::string error;
             if (shell->manager_.CloneVm(vm_id, &error)) {
                 shell->RefreshVmList();
                 auto done_msg = i18n::fmt(i18n::S::kStatusVmCloned, vm_name.c_str());
-                SendMessageA(p->statusbar, SB_SETTEXTA, 0,
-                    reinterpret_cast<LPARAM>(done_msg.c_str()));
+                SendMessageW(p->statusbar, SB_SETTEXTW, 0,
+                    reinterpret_cast<LPARAM>(i18n::to_wide(done_msg).c_str()));
             } else {
-                MessageBoxA(hwnd, error.c_str(), i18n::tr(i18n::S::kError), MB_OK | MB_ICONERROR);
+                MessageBoxW(hwnd, i18n::to_wide(error).c_str(), i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONERROR);
             }
             return 0;
         }
@@ -900,7 +912,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::string vm_id   = p->records[p->selected_index].spec.vm_id;
             std::string vm_name = p->records[p->selected_index].spec.name;
             auto prompt = i18n::fmt(i18n::S::kConfirmDeleteMsg, vm_name.c_str());
-            if (MessageBoxA(hwnd, prompt.c_str(), i18n::tr(i18n::S::kConfirmDeleteTitle),
+            if (MessageBoxW(hwnd, i18n::to_wide(prompt).c_str(), i18n::tr_w(i18n::S::kConfirmDeleteTitle).c_str(),
                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
                 std::string error;
                 if (shell->manager_.DeleteVm(vm_id, &error)) {
@@ -909,10 +921,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     p->display_available = false;
                     shell->RefreshVmList();
                     LayoutControls(p);
-                    SendMessageA(p->statusbar, SB_SETTEXTA, 0,
-                        reinterpret_cast<LPARAM>(i18n::tr(i18n::S::kStatusVmDeleted)));
+                    SendMessageW(p->statusbar, SB_SETTEXTW, 0,
+                        reinterpret_cast<LPARAM>(i18n::tr_w(i18n::S::kStatusVmDeleted).c_str()));
                 } else {
-                    MessageBoxA(hwnd, error.c_str(), i18n::tr(i18n::S::kError), MB_OK | MB_ICONERROR);
+                    MessageBoxW(hwnd, i18n::to_wide(error).c_str(), i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONERROR);
                 }
             }
             return 0;
@@ -1116,7 +1128,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (running_count > 0) {
                 auto exit_msg = i18n::fmt(i18n::S::kConfirmExitMsg, static_cast<unsigned>(running_count));
-                int result = MessageBoxA(hwnd, exit_msg.c_str(), i18n::tr(i18n::S::kConfirmExitTitle),
+                int result = MessageBoxW(hwnd, i18n::to_wide(exit_msg).c_str(), i18n::tr_w(i18n::S::kConfirmExitTitle).c_str(),
                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
                 if (result != IDYES) {
                     return 0;
@@ -1141,7 +1153,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
-    return DefWindowProcA(hwnd, msg, wp, lp);
+    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 // ── Lifetime ──
@@ -1162,12 +1174,12 @@ Win32UiShell::Win32UiShell(ManagerService& manager)
     RegisterMainClass(hinst);
 
     // Fonts
-    NONCLIENTMETRICSA ncm{sizeof(ncm)};
-    SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
-    impl_->ui_font = CreateFontIndirectA(&ncm.lfMessageFont);
+    NONCLIENTMETRICSW ncm{sizeof(ncm)};
+    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    impl_->ui_font = CreateFontIndirectW(&ncm.lfMessageFont);
     ncm.lfMessageFont.lfHeight = -13;
-    lstrcpyA(ncm.lfMessageFont.lfFaceName, "Consolas");
-    impl_->mono_font = CreateFontIndirectA(&ncm.lfMessageFont);
+    lstrcpyW(ncm.lfMessageFont.lfFaceName, L"Consolas");
+    impl_->mono_font = CreateFontIndirectW(&ncm.lfMessageFont);
 
     // Restore geometry
     const auto& geo = manager_.app_settings().window;
@@ -1180,13 +1192,13 @@ Win32UiShell::Win32UiShell(ManagerService& manager)
     impl_->menu_bar = BuildMenuBar(manager_.app_settings().show_toolbar,
                                     manager_.app_settings().adaptive_display);
 
-    impl_->hwnd = CreateWindowExA(0, kWndClass, i18n::tr(i18n::S::kAppTitle),
+    impl_->hwnd = CreateWindowExW(0, kWndClass, i18n::tr_w(i18n::S::kAppTitle).c_str(),
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x, y, w, h,
         nullptr, impl_->menu_bar, hinst, nullptr);
 
     g_main_hwnd = impl_->hwnd;
-    SetWindowLongPtrA(impl_->hwnd, GWLP_USERDATA,
+    SetWindowLongPtrW(impl_->hwnd, GWLP_USERDATA,
         reinterpret_cast<LONG_PTR>(impl_.get()));
 
     AddClipboardFormatListener(impl_->hwnd);
@@ -1195,7 +1207,7 @@ Win32UiShell::Win32UiShell(ManagerService& manager)
     if (!manager_.app_settings().show_toolbar) {
         ShowWindow(impl_->toolbar, SW_HIDE);
     }
-    impl_->statusbar = CreateWindowExA(0, STATUSCLASSNAMEA, nullptr,
+    impl_->statusbar = CreateWindowExW(0, STATUSCLASSNAMEW, nullptr,
         WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
         0, 0, 0, 0, impl_->hwnd,
         reinterpret_cast<HMENU>(IDC_STATUSBAR), hinst, nullptr);
@@ -1217,7 +1229,7 @@ Win32UiShell::Win32UiShell(ManagerService& manager)
     impl_->console_tab.Create(impl_->hwnd, hinst, impl_->mono_font, impl_->ui_font);
 
     // Tab control
-    impl_->tab = CreateWindowExA(0, WC_TABCONTROLA, nullptr,
+    impl_->tab = CreateWindowExW(0, WC_TABCONTROLW, nullptr,
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
         0, 0, 0, 0, impl_->hwnd,
         reinterpret_cast<HMENU>(IDC_TAB), hinst, nullptr);
@@ -1225,16 +1237,19 @@ Win32UiShell::Win32UiShell(ManagerService& manager)
         reinterpret_cast<WPARAM>(impl_->ui_font), FALSE);
     SendMessage(impl_->tab, TCM_SETPADDING, 0, MAKELPARAM(24, 8));
     {
-        TCITEMA ti{};
+        std::wstring wtab_info = i18n::tr_w(i18n::S::kTabInfo);
+        std::wstring wtab_console = i18n::tr_w(i18n::S::kTabConsole);
+        std::wstring wtab_display = i18n::tr_w(i18n::S::kTabDisplay);
+        TCITEMW ti{};
         ti.mask = TCIF_TEXT;
-        ti.pszText = const_cast<char*>(i18n::tr(i18n::S::kTabInfo));
-        SendMessageA(impl_->tab, TCM_INSERTITEMA, kTabInfo,
+        ti.pszText = wtab_info.data();
+        SendMessageW(impl_->tab, TCM_INSERTITEMW, kTabInfo,
             reinterpret_cast<LPARAM>(&ti));
-        ti.pszText = const_cast<char*>(i18n::tr(i18n::S::kTabConsole));
-        SendMessageA(impl_->tab, TCM_INSERTITEMA, kTabConsole,
+        ti.pszText = wtab_console.data();
+        SendMessageW(impl_->tab, TCM_INSERTITEMW, kTabConsole,
             reinterpret_cast<LPARAM>(&ti));
-        ti.pszText = const_cast<char*>(i18n::tr(i18n::S::kTabDisplay));
-        SendMessageA(impl_->tab, TCM_INSERTITEMA, kTabDisplay,
+        ti.pszText = wtab_display.data();
+        SendMessageW(impl_->tab, TCM_INSERTITEMW, kTabDisplay,
             reinterpret_cast<LPARAM>(&ti));
     }
 
@@ -1397,8 +1412,8 @@ Win32UiShell::Win32UiShell(ManagerService& manager)
                     ports_str += "  - " + mapping + "\n";
                 }
                 std::string msg = i18n::fmt(i18n::S::kPfBindErrorMsg, ports_str.c_str());
-                MessageBoxA(impl_->hwnd, msg.c_str(),
-                    i18n::tr(i18n::S::kPfBindErrorTitle), MB_OK | MB_ICONWARNING);
+                MessageBoxW(impl_->hwnd, i18n::to_wide(msg).c_str(),
+                    i18n::tr_w(i18n::S::kPfBindErrorTitle).c_str(), MB_OK | MB_ICONWARNING);
             });
         });
 
@@ -1507,7 +1522,7 @@ void Win32UiShell::RefreshVmList() {
     UpdateCommandStates(impl_.get());
 
     auto status = i18n::fmt(i18n::S::kStatusVmsLoaded, static_cast<unsigned>(impl_->records.size()));
-    SendMessageA(impl_->statusbar, SB_SETTEXTA, 0, reinterpret_cast<LPARAM>(status.c_str()));
+    SendMessageW(impl_->statusbar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(i18n::to_wide(status).c_str()));
 }
 
 void Win32UiShell::InvokeOnUiThread(std::function<void()> fn) {

@@ -1,4 +1,5 @@
 #include "manager/app_settings.h"
+#include "manager/i18n.h"
 
 #define NOMINMAX
 #include <windows.h>
@@ -26,13 +27,14 @@ static void EnsureDir(const std::string& dir) {
 }
 
 static std::string PathToUtf8(const fs::path& p) {
-    return p.string();
+    auto u8 = p.u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
 
 std::string GetDataDir() {
-    char path[MAX_PATH]{};
-    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, path))) {
-        return std::string(path) + "\\TenBox";
+    wchar_t path[MAX_PATH]{};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, path))) {
+        return i18n::wide_to_utf8(path) + "\\TenBox";
     }
     return {};
 }

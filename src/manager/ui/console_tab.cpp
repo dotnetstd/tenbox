@@ -4,7 +4,7 @@
 #include <commctrl.h>
 
 void ConsoleTab::Create(HWND parent, HINSTANCE hinst, HFONT mono_font, HFONT ui_font) {
-    console_ = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+    console_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL |
         ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
         0, 0, 0, 0, parent,
@@ -14,17 +14,17 @@ void ConsoleTab::Create(HWND parent, HINSTANCE hinst, HFONT mono_font, HFONT ui_
     SendMessage(console_, WM_SETFONT,
         reinterpret_cast<WPARAM>(mono_font), FALSE);
 
-    console_in_ = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+    console_in_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
         0, 0, 0, 0, parent,
         reinterpret_cast<HMENU>(kInputId), hinst, nullptr);
     SendMessage(console_in_, WM_SETFONT,
         reinterpret_cast<WPARAM>(mono_font), FALSE);
-    auto placeholder = i18n::to_wide(i18n::tr(i18n::S::kConsolePlaceholder));
+    auto placeholder = i18n::tr_w(i18n::S::kConsolePlaceholder);
     SendMessageW(console_in_, EM_SETCUEBANNER, FALSE,
         reinterpret_cast<LPARAM>(placeholder.c_str()));
 
-    send_btn_ = CreateWindowExA(0, "BUTTON", i18n::tr(i18n::S::kSend),
+    send_btn_ = CreateWindowExW(0, L"BUTTON", i18n::tr_w(i18n::S::kSend).c_str(),
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         0, 0, 0, 0, parent,
         reinterpret_cast<HMENU>(kSendBtnId), hinst, nullptr);
@@ -60,21 +60,22 @@ void ConsoleTab::SetEnabled(bool enabled) {
 }
 
 void ConsoleTab::SetText(const char* text) {
-    SetWindowTextA(console_, text);
+    SetWindowTextW(console_, i18n::to_wide(text).c_str());
 }
 
 void ConsoleTab::AppendText(const std::string& text) {
-    int ctl_len = GetWindowTextLengthA(console_);
+    int ctl_len = GetWindowTextLengthW(console_);
     if (ctl_len > static_cast<int>(kTrimAt)) {
         int cut = ctl_len / 2;
-        SendMessageA(console_, EM_SETSEL, 0, cut);
-        SendMessageA(console_, EM_REPLACESEL, FALSE,
-            reinterpret_cast<LPARAM>(""));
-        ctl_len = GetWindowTextLengthA(console_);
+        SendMessageW(console_, EM_SETSEL, 0, cut);
+        SendMessageW(console_, EM_REPLACESEL, FALSE,
+            reinterpret_cast<LPARAM>(L""));
+        ctl_len = GetWindowTextLengthW(console_);
     }
-    SendMessageA(console_, EM_SETSEL, ctl_len, ctl_len);
-    SendMessageA(console_, EM_REPLACESEL, FALSE,
-        reinterpret_cast<LPARAM>(text.c_str()));
+    SendMessageW(console_, EM_SETSEL, ctl_len, ctl_len);
+    std::wstring wtext = i18n::to_wide(text);
+    SendMessageW(console_, EM_REPLACESEL, FALSE,
+        reinterpret_cast<LPARAM>(wtext.c_str()));
 }
 
 std::string ConsoleTab::FilterAndAppend(TextState& state, const std::string& raw) {

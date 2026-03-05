@@ -84,6 +84,11 @@ DownloadResult FetchString(const std::string& url) {
         return result;
     }
 
+    DWORD timeout_ms = 15000;
+    WinHttpSetOption(session, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout_ms, sizeof(timeout_ms));
+    WinHttpSetOption(session, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout_ms, sizeof(timeout_ms));
+    WinHttpSetOption(session, WINHTTP_OPTION_SEND_TIMEOUT, &timeout_ms, sizeof(timeout_ms));
+
     HINTERNET connect = WinHttpConnect(session, parts.host.c_str(), parts.port, 0);
     if (!connect) {
         WinHttpCloseHandle(session);
@@ -259,8 +264,9 @@ DownloadResult DownloadFile(const std::string& url,
     char buffer[65536];
     DWORD bytes_read = 0;
     uint64_t total_read = 0;
+    bool read_error = false;
 
-    while (WinHttpReadData(request, buffer, sizeof(buffer), &bytes_read) && bytes_read > 0) {
+    for (;;) {
         if (cancel_flag && cancel_flag->load()) {
             WinHttpCloseHandle(request);
             WinHttpCloseHandle(connect);
@@ -270,6 +276,12 @@ DownloadResult DownloadFile(const std::string& url,
             result.error = "Download cancelled";
             return result;
         }
+
+        if (!WinHttpReadData(request, buffer, sizeof(buffer), &bytes_read)) {
+            read_error = true;
+            break;
+        }
+        if (bytes_read == 0) break;
 
         ofs.write(buffer, bytes_read);
         total_read += bytes_read;
@@ -283,6 +295,19 @@ DownloadResult DownloadFile(const std::string& url,
     WinHttpCloseHandle(request);
     WinHttpCloseHandle(connect);
     WinHttpCloseHandle(session);
+
+    if (read_error) {
+        fs::remove(tmp_path, ec);
+        result.error = "Network read error";
+        return result;
+    }
+
+    if (content_length > 0 && total_read != content_length) {
+        fs::remove(tmp_path, ec);
+        result.error = "Incomplete download (got " + std::to_string(total_read)
+                       + " of " + std::to_string(content_length) + " bytes)";
+        return result;
+    }
 
     if (!expected_sha256.empty()) {
         std::string actual_hash = FileSha256(tmp_path);

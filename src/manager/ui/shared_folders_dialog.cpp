@@ -3,7 +3,12 @@
 #include "manager/i18n.h"
 #include "manager/manager_service.h"
 
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <commctrl.h>
+
+#include <array>
 #include <string>
 
 enum SfDlgId {
@@ -25,26 +30,31 @@ static void SfRefreshList(SfDlgData* data) {
     auto folders = data->mgr->GetSharedFolders(data->vm_id);
     for (size_t i = 0; i < folders.size(); ++i) {
         const auto& sf = folders[i];
-        LVITEMA item{};
+        std::wstring tag_w = i18n::to_wide(sf.tag);
+        std::wstring path_w = i18n::to_wide(sf.host_path);
+        std::wstring mode_w = sf.readonly ? i18n::tr_w(i18n::S::kSfModeReadOnly) : i18n::tr_w(i18n::S::kSfModeReadWrite);
+        LVITEMW item{};
         item.mask = LVIF_TEXT;
         item.iItem = static_cast<int>(i);
-        item.pszText = const_cast<char*>(sf.tag.c_str());
-        int idx = ListView_InsertItem(lv, &item);
-        ListView_SetItemText(lv, idx, 1, const_cast<char*>(sf.host_path.c_str()));
-        ListView_SetItemText(lv, idx, 2,
-            const_cast<char*>(sf.readonly
-                ? i18n::tr(i18n::S::kSfModeReadOnly)
-                : i18n::tr(i18n::S::kSfModeReadWrite)));
+        item.pszText = tag_w.data();
+        int idx = static_cast<int>(SendMessageW(lv, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+        LVITEMW setitem{};
+        setitem.iSubItem = 1;
+        setitem.pszText = path_w.data();
+        SendMessageW(lv, LVM_SETITEMTEXTW, idx, reinterpret_cast<LPARAM>(&setitem));
+        setitem.iSubItem = 2;
+        setitem.pszText = mode_w.data();
+        SendMessageW(lv, LVM_SETITEMTEXTW, idx, reinterpret_cast<LPARAM>(&setitem));
     }
 }
 
 static INT_PTR CALLBACK SfDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
-    auto* data = reinterpret_cast<SfDlgData*>(GetWindowLongPtrA(dlg, DWLP_USER));
+    auto* data = reinterpret_cast<SfDlgData*>(GetWindowLongPtrW(dlg, DWLP_USER));
 
     switch (msg) {
     case WM_INITDIALOG: {
         data = reinterpret_cast<SfDlgData*>(lp);
-        SetWindowLongPtrA(dlg, DWLP_USER, reinterpret_cast<LONG_PTR>(data));
+        SetWindowLongPtrW(dlg, DWLP_USER, reinterpret_cast<LONG_PTR>(data));
 
         RECT rc;
         GetClientRect(dlg, &rc);
@@ -55,7 +65,7 @@ static INT_PTR CALLBACK SfDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         int list_w = rc.right - btn_w - gap * 3;
         int list_h = rc.bottom - gap * 2;
 
-        HWND lv = CreateWindowExA(WS_EX_CLIENTEDGE, WC_LISTVIEWA, "",
+        HWND lv = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
             WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
             gap, gap, list_w, list_h,
             dlg, reinterpret_cast<HMENU>(IDC_SF_LIST),
@@ -63,17 +73,20 @@ static INT_PTR CALLBACK SfDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         ListView_SetExtendedListViewStyle(lv,
             LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
-        LVCOLUMNA col{};
+        std::wstring col_tag = i18n::tr_w(i18n::S::kSfColTag);
+        std::wstring col_path = i18n::tr_w(i18n::S::kSfColHostPath);
+        std::wstring col_mode = i18n::tr_w(i18n::S::kSfColMode);
+        LVCOLUMNW col{};
         col.mask = LVCF_TEXT | LVCF_WIDTH;
         col.cx = 110;
-        col.pszText = const_cast<char*>(i18n::tr(i18n::S::kSfColTag));
+        col.pszText = col_tag.data();
         ListView_InsertColumn(lv, 0, &col);
         col.cx = list_w - 110 - 90 - 4;
         if (col.cx < 80) col.cx = 80;
-        col.pszText = const_cast<char*>(i18n::tr(i18n::S::kSfColHostPath));
+        col.pszText = col_path.data();
         ListView_InsertColumn(lv, 1, &col);
         col.cx = 90;
-        col.pszText = const_cast<char*>(i18n::tr(i18n::S::kSfColMode));
+        col.pszText = col_mode.data();
         ListView_InsertColumn(lv, 2, &col);
 
         data->listview = lv;
@@ -105,8 +118,8 @@ static INT_PTR CALLBACK SfDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
                 if (data->mgr->AddSharedFolder(data->vm_id, sf, &error)) {
                     SfRefreshList(data);
                 } else {
-                    MessageBoxA(dlg, error.c_str(),
-                        i18n::tr(i18n::S::kError), MB_OK | MB_ICONERROR);
+                    MessageBoxW(dlg, i18n::to_wide(error).c_str(),
+                        i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONERROR);
                 }
             }
             return TRUE;
@@ -114,22 +127,27 @@ static INT_PTR CALLBACK SfDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_SF_REMOVE: {
             int sel = ListView_GetNextItem(data->listview, -1, LVNI_SELECTED);
             if (sel < 0) {
-                MessageBoxA(dlg, i18n::tr(i18n::S::kSfNoSelection),
-                    i18n::tr(i18n::S::kError), MB_OK | MB_ICONWARNING);
+                MessageBoxW(dlg, i18n::tr_w(i18n::S::kSfNoSelection).c_str(),
+                    i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONWARNING);
                 return TRUE;
             }
-            char tag_buf[64]{};
-            ListView_GetItemText(data->listview, sel, 0, tag_buf, sizeof(tag_buf));
-            std::string prompt = i18n::fmt(i18n::S::kSfConfirmRemoveMsg, tag_buf);
-            if (MessageBoxA(dlg, prompt.c_str(),
-                    i18n::tr(i18n::S::kSfConfirmRemoveTitle),
+            wchar_t tag_buf[64]{};
+            LVITEMW lvi_get{};
+            lvi_get.iSubItem = 0;
+            lvi_get.pszText = tag_buf;
+            lvi_get.cchTextMax = static_cast<int>(std::size(tag_buf));
+            SendMessageW(data->listview, LVM_GETITEMTEXTW, sel, reinterpret_cast<LPARAM>(&lvi_get));
+            std::string tag_str = i18n::wide_to_utf8(tag_buf);
+            std::string prompt = i18n::fmt(i18n::S::kSfConfirmRemoveMsg, tag_str.c_str());
+            if (MessageBoxW(dlg, i18n::to_wide(prompt).c_str(),
+                    i18n::tr_w(i18n::S::kSfConfirmRemoveTitle).c_str(),
                     MB_YESNO | MB_ICONQUESTION) == IDYES) {
                 std::string error;
-                if (data->mgr->RemoveSharedFolder(data->vm_id, tag_buf, &error)) {
+                if (data->mgr->RemoveSharedFolder(data->vm_id, tag_str, &error)) {
                     SfRefreshList(data);
                 } else {
-                    MessageBoxA(dlg, error.c_str(),
-                        i18n::tr(i18n::S::kError), MB_OK | MB_ICONERROR);
+                    MessageBoxW(dlg, i18n::to_wide(error).c_str(),
+                        i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONERROR);
                 }
             }
             return TRUE;
@@ -156,6 +174,6 @@ void ShowSharedFoldersDialog(HWND parent, ManagerService& mgr, const std::string
     b.AddButton(IDC_SF_REMOVE, i18n::tr(S::kSfBtnRemove), 0, 0, btn_w, btn_h);
 
     SfDlgData data{&mgr, vm_id, nullptr};
-    DialogBoxIndirectParamA(GetModuleHandle(nullptr), b.Build(), parent,
+    DialogBoxIndirectParamW(GetModuleHandle(nullptr), b.Build(), parent,
         SfDlgProc, reinterpret_cast<LPARAM>(&data));
 }

@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cstring>
 
-static const char* kDisplayPanelClass = "TenBoxDisplayPanel";
+static const wchar_t* kDisplayPanelClass = L"TenBoxDisplayPanel";
 static bool g_class_registered = false;
 
 static constexpr int kHintBarHeight = 20;
@@ -24,7 +24,7 @@ DisplayPanel::~DisplayPanel() {
 
 static void RegisterPanelClass(HINSTANCE hinst) {
     if (g_class_registered) return;
-    WNDCLASSEXA wc{};
+    WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
     wc.lpfnWndProc = DisplayPanel::WndProc;
@@ -32,13 +32,13 @@ static void RegisterPanelClass(HINSTANCE hinst) {
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     wc.lpszClassName = kDisplayPanelClass;
-    RegisterClassExA(&wc);
+    RegisterClassExW(&wc);
     g_class_registered = true;
 }
 
 bool DisplayPanel::Create(HWND parent, HINSTANCE hinst, int x, int y, int w, int h) {
     RegisterPanelClass(hinst);
-    hwnd_ = CreateWindowExA(
+    hwnd_ = CreateWindowExW(
         WS_EX_CLIENTEDGE,
         kDisplayPanelClass,
         nullptr,
@@ -574,15 +574,15 @@ LRESULT CALLBACK DisplayPanel::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     DisplayPanel* self = nullptr;
 
     if (msg == WM_NCCREATE) {
-        auto* cs = reinterpret_cast<CREATESTRUCTA*>(lp);
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
         self = reinterpret_cast<DisplayPanel*>(cs->lpCreateParams);
-        SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
     } else {
         self = reinterpret_cast<DisplayPanel*>(
-            GetWindowLongPtrA(hwnd, GWLP_USERDATA));
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     }
 
-    if (!self) return DefWindowProcA(hwnd, msg, wp, lp);
+    if (!self) return DefWindowProcW(hwnd, msg, wp, lp);
 
     switch (msg) {
     case WM_PAINT:
@@ -641,5 +641,5 @@ LRESULT CALLBACK DisplayPanel::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         return 1;
     }
 
-    return DefWindowProcA(hwnd, msg, wp, lp);
+    return DefWindowProcW(hwnd, msg, wp, lp);
 }

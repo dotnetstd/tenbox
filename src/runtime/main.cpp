@@ -2,10 +2,16 @@
 #include "version.h"
 #include "core/vmm/vm.h"
 
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shellapi.h>
+
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <vector>
 
 static void PrintVersion() {
     fprintf(stderr, "TenBox vm-runtime v" TENBOX_VERSION "\n");
@@ -36,6 +42,29 @@ static void PrintUsage(const char* prog) {
 }
 
 int main(int argc, char* argv[]) {
+    // Get true Unicode command line, bypassing ANSI codepage on pre-1903 Windows
+    int wargc = 0;
+    wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+    std::vector<std::string> u8args;
+    std::vector<char*> u8argv_ptrs;
+    if (wargv && wargc > 0) {
+        u8args.reserve(static_cast<size_t>(wargc));
+        u8argv_ptrs.reserve(static_cast<size_t>(wargc));
+        for (int i = 0; i < wargc; i++) {
+            int len = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, nullptr, 0, nullptr, nullptr);
+            if (len <= 0) {
+                u8args.push_back("");
+            } else {
+                u8args.push_back(std::string(len - 1, '\0'));
+                WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, u8args.back().data(), len, nullptr, nullptr);
+            }
+            u8argv_ptrs.push_back(u8args.back().data());
+        }
+        LocalFree(wargv);
+        argc = wargc;
+        argv = u8argv_ptrs.data();
+    }
+
     // Set line buffering for stdout/stderr so logs flush on newline
     setvbuf(stdout, nullptr, _IOLBF, BUFSIZ);
     setvbuf(stderr, nullptr, _IOLBF, BUFSIZ);

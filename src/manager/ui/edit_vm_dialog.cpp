@@ -24,27 +24,27 @@ struct EditDlgData {
 };
 
 static INT_PTR CALLBACK EditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
-    auto* data = reinterpret_cast<EditDlgData*>(GetWindowLongPtrA(dlg, DWLP_USER));
+    auto* data = reinterpret_cast<EditDlgData*>(GetWindowLongPtrW(dlg, DWLP_USER));
 
     switch (msg) {
     case WM_INITDIALOG: {
         data = reinterpret_cast<EditDlgData*>(lp);
-        SetWindowLongPtrA(dlg, DWLP_USER, reinterpret_cast<LONG_PTR>(data));
+        SetWindowLongPtrW(dlg, DWLP_USER, reinterpret_cast<LONG_PTR>(data));
 
         std::string title = std::string(i18n::tr(i18n::S::kDlgEditTitlePrefix)) + data->rec.spec.name;
-        SetWindowTextA(dlg, title.c_str());
+        SetWindowTextW(dlg, i18n::to_wide(title).c_str());
 
-        SetDlgItemTextA(dlg, IDC_ED_NAME, data->rec.spec.name.c_str());
+        SetDlgItemTextW(dlg, IDC_ED_NAME, i18n::to_wide(data->rec.spec.name).c_str());
 
         HWND mem_cb = GetDlgItem(dlg, IDC_ED_MEMORY);
         for (int i = 0; i < kNumOptions; ++i)
-            SendMessageA(mem_cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kMemoryLabels[i]));
+            SendMessageW(mem_cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::to_wide(kMemoryLabels[i]).c_str()));
         SendMessage(mem_cb, CB_SETCURSEL,
             MemoryMbToIndex(static_cast<int>(data->rec.spec.memory_mb)), 0);
 
         HWND cpu_cb = GetDlgItem(dlg, IDC_ED_CPUS);
         for (int i = 0; i < kNumOptions; ++i)
-            SendMessageA(cpu_cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kCpuLabels[i]));
+            SendMessageW(cpu_cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(i18n::to_wide(kCpuLabels[i]).c_str()));
         SendMessage(cpu_cb, CB_SETCURSEL,
             CpuCountToIndex(static_cast<int>(data->rec.spec.cpu_count)), 0);
 
@@ -56,7 +56,7 @@ static INT_PTR CALLBACK EditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         EnableWindow(cpu_cb, !running);
 
         if (running) {
-            SetDlgItemTextA(dlg, IDC_ED_WARN, i18n::tr(i18n::S::kCpuMemoryChangeWarning));
+            SetDlgItemTextW(dlg, IDC_ED_WARN, i18n::tr_w(i18n::S::kCpuMemoryChangeWarning).c_str());
         }
 
         return TRUE;
@@ -87,7 +87,7 @@ static INT_PTR CALLBACK EditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
                 data->saved = true;
                 EndDialog(dlg, IDOK);
             } else {
-                MessageBoxA(dlg, error.c_str(), i18n::tr(i18n::S::kError), MB_OK | MB_ICONERROR);
+                MessageBoxW(dlg, i18n::to_wide(error).c_str(), i18n::tr_w(i18n::S::kError).c_str(), MB_OK | MB_ICONERROR);
             }
             return TRUE;
         }
@@ -123,7 +123,7 @@ bool ShowEditVmDialog(HWND parent, ManagerService& mgr,
     b.AddDefButton(IDOK,     i18n::tr(S::kDlgBtnSave),  W - 56, y, 48, 14);
 
     EditDlgData data{&mgr, rec, false, ""};
-    DialogBoxIndirectParamA(GetModuleHandle(nullptr), b.Build(), parent,
+    DialogBoxIndirectParamW(GetModuleHandle(nullptr), b.Build(), parent,
         EditDlgProc, reinterpret_cast<LPARAM>(&data));
 
     if (error) *error = data.error;

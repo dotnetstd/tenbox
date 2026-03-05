@@ -2,16 +2,15 @@
 #include "common/vm_model.h"
 #include "manager/i18n.h"
 
-#include <cstring>
 #include <ctime>
 #include <string>
 
 void InfoTab::Create(HWND parent, HINSTANCE hinst, HFONT ui_font) {
     for (int i = 0; i < kDetailRows; ++i) {
-        labels_[i] = CreateWindowExA(0, "STATIC", "",
+        labels_[i] = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | SS_RIGHT,
             0, 0, 0, 0, parent, nullptr, hinst, nullptr);
-        values_[i] = CreateWindowExA(0, "EDIT", "",
+        values_[i] = CreateWindowExW(0, L"EDIT", L"",
             WS_CHILD | ES_READONLY | ES_AUTOHSCROLL,
             0, 0, 0, 0, parent, nullptr, hinst, nullptr);
         SendMessage(labels_[i], WM_SETFONT,
@@ -34,19 +33,19 @@ void InfoTab::Layout(HWND hwnd, HFONT ui_font, int px, int py, int pw, int ph) {
 
     HDC hdc = GetDC(hwnd);
     HFONT old_font = static_cast<HFONT>(SelectObject(hdc, ui_font));
-    TEXTMETRICA tm{};
-    GetTextMetricsA(hdc, &tm);
+    TEXTMETRICW tm{};
+    GetTextMetricsW(hdc, &tm);
 
-    const char* kLabels[] = {
-        i18n::tr(i18n::S::kLabelId), i18n::tr(i18n::S::kLabelLocation),
-        i18n::tr(i18n::S::kLabelMemory), i18n::tr(i18n::S::kLabelVcpus),
-        i18n::tr(i18n::S::kLabelNat),
-        i18n::tr(i18n::S::kLabelCreatedTime), i18n::tr(i18n::S::kLabelLastBootTime)
+    std::wstring kLabels[] = {
+        i18n::tr_w(i18n::S::kLabelId), i18n::tr_w(i18n::S::kLabelLocation),
+        i18n::tr_w(i18n::S::kLabelMemory), i18n::tr_w(i18n::S::kLabelVcpus),
+        i18n::tr_w(i18n::S::kLabelNat),
+        i18n::tr_w(i18n::S::kLabelCreatedTime), i18n::tr_w(i18n::S::kLabelLastBootTime)
     };
     int label_w = 0;
-    for (const char* lbl : kLabels) {
+    for (const auto& lbl : kLabels) {
         SIZE sz{};
-        GetTextExtentPoint32A(hdc, lbl, static_cast<int>(strlen(lbl)), &sz);
+        GetTextExtentPoint32W(hdc, lbl.c_str(), static_cast<int>(lbl.size()), &sz);
         if (sz.cx > label_w) label_w = sz.cx;
     }
     label_w += 12;
@@ -87,29 +86,29 @@ std::string FormatTimestamp(int64_t ts) {
 
 void InfoTab::Update(const VmSpec* spec) {
     using S = i18n::S;
-    const char* label_texts[] = {
-        i18n::tr(S::kLabelId), i18n::tr(S::kLabelLocation),
-        i18n::tr(S::kLabelMemory), i18n::tr(S::kLabelVcpus),
-        i18n::tr(S::kLabelNat),
-        i18n::tr(S::kLabelCreatedTime), i18n::tr(S::kLabelLastBootTime)
+    std::wstring label_texts[] = {
+        i18n::tr_w(S::kLabelId), i18n::tr_w(S::kLabelLocation),
+        i18n::tr_w(S::kLabelMemory), i18n::tr_w(S::kLabelVcpus),
+        i18n::tr_w(S::kLabelNat),
+        i18n::tr_w(S::kLabelCreatedTime), i18n::tr_w(S::kLabelLastBootTime)
     };
     for (int i = 0; i < kDetailRows; ++i)
-        SetWindowTextA(labels_[i], label_texts[i]);
+        SetWindowTextW(labels_[i], label_texts[i].c_str());
 
     if (!spec) {
         for (int i = 0; i < kDetailRows; ++i)
-            SetWindowTextA(values_[i], "");
+            SetWindowTextW(values_[i], L"");
         return;
     }
 
     auto mb_str = std::to_string(spec->memory_mb) + " MB";
     auto cpu_str = std::to_string(spec->cpu_count);
 
-    SetWindowTextA(values_[0], spec->vm_id.c_str());
-    SetWindowTextA(values_[1], spec->vm_dir.c_str());
-    SetWindowTextA(values_[2], mb_str.c_str());
-    SetWindowTextA(values_[3], cpu_str.c_str());
-    SetWindowTextA(values_[4], spec->nat_enabled ? i18n::tr(S::kNatEnabled) : i18n::tr(S::kNatDisabled));
-    SetWindowTextA(values_[5], FormatTimestamp(spec->creation_time).c_str());
-    SetWindowTextA(values_[6], FormatTimestamp(spec->last_boot_time).c_str());
+    SetWindowTextW(values_[0], i18n::to_wide(spec->vm_id).c_str());
+    SetWindowTextW(values_[1], i18n::to_wide(spec->vm_dir).c_str());
+    SetWindowTextW(values_[2], i18n::to_wide(mb_str).c_str());
+    SetWindowTextW(values_[3], i18n::to_wide(cpu_str).c_str());
+    SetWindowTextW(values_[4], (spec->nat_enabled ? i18n::tr_w(S::kNatEnabled) : i18n::tr_w(S::kNatDisabled)).c_str());
+    SetWindowTextW(values_[5], i18n::to_wide(FormatTimestamp(spec->creation_time)).c_str());
+    SetWindowTextW(values_[6], i18n::to_wide(FormatTimestamp(spec->last_boot_time)).c_str());
 }

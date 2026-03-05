@@ -6,6 +6,8 @@
 #include <commdlg.h>
 #include <shlobj.h>
 
+#include "manager/i18n.h"
+
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -31,80 +33,101 @@ inline int CpuCountToIndex(int count) {
 }
 
 inline std::string GetDlgText(HWND dlg, int id) {
-    char buf[1024]{};
-    GetDlgItemTextA(dlg, id, buf, sizeof(buf));
-    return buf;
+    wchar_t buf[1024]{};
+    GetDlgItemTextW(dlg, id, buf, static_cast<int>(std::size(buf)));
+    return i18n::wide_to_utf8(buf);
 }
 
 inline std::string BrowseForFile(HWND owner, const char* filter, const char* current_path) {
-    char file_buf[MAX_PATH]{};
+    wchar_t file_buf[MAX_PATH]{};
     if (current_path && *current_path)
-        strncpy(file_buf, current_path, MAX_PATH - 1);
+        MultiByteToWideChar(CP_UTF8, 0, current_path, -1, file_buf, MAX_PATH);
 
-    std::string init_dir;
+    std::wstring init_dir_w;
     if (current_path && *current_path) {
         namespace fs = std::filesystem;
-        init_dir = fs::path(current_path).parent_path().string();
+        auto u8dir = fs::path(current_path).parent_path().u8string();
+        std::string init_dir(reinterpret_cast<const char*>(u8dir.data()), u8dir.size());
+        init_dir_w = i18n::to_wide(init_dir);
     }
 
-    OPENFILENAMEA ofn{};
+    // Convert filter (null-separated pairs: "Desc\0Pattern\0") to wide
+    std::wstring filter_w;
+    if (filter && *filter) {
+        const char* p = filter;
+        while (*p) {
+            size_t len = std::strlen(p);
+            filter_w += i18n::to_wide(std::string(p, len));
+            filter_w += L'\0';
+            p += len + 1;
+        }
+        filter_w += L'\0';
+    }
+    OPENFILENAMEW ofn{};
     ofn.lStructSize  = sizeof(ofn);
     ofn.hwndOwner    = owner;
-    ofn.lpstrFilter  = filter;
+    ofn.lpstrFilter  = filter_w.empty() ? nullptr : filter_w.c_str();
     ofn.lpstrFile    = file_buf;
     ofn.nMaxFile     = MAX_PATH;
     ofn.Flags        = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
-    if (!init_dir.empty())
-        ofn.lpstrInitialDir = init_dir.c_str();
+    if (!init_dir_w.empty())
+        ofn.lpstrInitialDir = init_dir_w.c_str();
 
-    if (GetOpenFileNameA(&ofn))
-        return std::string(file_buf);
+    if (GetOpenFileNameW(&ofn))
+        return i18n::wide_to_utf8(file_buf);
     return {};
 }
 
 inline int CALLBACK BrowseFolderCallback(HWND hwnd, UINT msg, LPARAM, LPARAM data) {
     if (msg == BFFM_INITIALIZED && data)
-        SendMessageA(hwnd, BFFM_SETSELECTIONA, TRUE, data);
+        SendMessageW(hwnd, BFFM_SETSELECTIONW, TRUE, data);
     return 0;
 }
 
 inline std::string BrowseForFolder(HWND owner, const char* title, const char* current_path) {
-    std::string init_dir;
+    std::wstring init_dir_w;
     if (current_path && *current_path) {
         namespace fs = std::filesystem;
         fs::path p(current_path);
-        if (fs::is_directory(p))
-            init_dir = p.string();
-        else if (p.has_parent_path())
-            init_dir = p.parent_path().string();
+        std::string init_dir;
+        if (fs::is_directory(p)) {
+            auto u8 = p.u8string();
+            init_dir.assign(reinterpret_cast<const char*>(u8.data()), u8.size());
+        } else if (p.has_parent_path()) {
+            auto u8 = p.parent_path().u8string();
+            init_dir.assign(reinterpret_cast<const char*>(u8.data()), u8.size());
+        }
+        if (!init_dir.empty())
+            init_dir_w = i18n::to_wide(init_dir);
     }
 
-    BROWSEINFOA bi{};
+    std::wstring title_w = title ? i18n::to_wide(title) : std::wstring();
+    BROWSEINFOW bi{};
     bi.hwndOwner = owner;
-    bi.lpszTitle = title;
+    bi.lpszTitle = title_w.c_str();
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    if (!init_dir.empty()) {
+    if (!init_dir_w.empty()) {
         bi.lpfn = BrowseFolderCallback;
-        bi.lParam = reinterpret_cast<LPARAM>(init_dir.c_str());
+        bi.lParam = reinterpret_cast<LPARAM>(init_dir_w.c_str());
     }
 
-    LPITEMIDLIST pidl = SHBrowseForFolderA(&bi);
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
     if (pidl) {
-        char path_buf[MAX_PATH]{};
-        SHGetPathFromIDListA(pidl, path_buf);
+        wchar_t path_buf[MAX_PATH]{};
+        SHGetPathFromIDListW(pidl, path_buf);
         CoTaskMemFree(pidl);
-        return std::string(path_buf);
+        return i18n::wide_to_utf8(path_buf);
     }
     return {};
 }
 
 inline std::string ExeDirectory() {
-    char buf[MAX_PATH]{};
-    DWORD len = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    wchar_t buf[MAX_PATH]{};
+    DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);
     if (len == 0 || len >= MAX_PATH) return {};
-    std::string dir(buf, len);
+    std::string dir = i18n::wide_to_utf8(buf);
     auto sep = dir.find_last_of("\\/");
-    return (sep != std::string::npos) ? dir.substr(0, sep + 1) : std::string{};
+    return (sep != std::string::npos) ? dir.substr(0, sep + 1) : dir;
 }
 
 inline std::string FindShareFile(const std::string& exe_dir, const char* filename) {
