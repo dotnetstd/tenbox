@@ -23,7 +23,7 @@ A Windows-native Virtual Machine Monitor (VMM) built on the Windows Hypervisor P
 
 ### Prerequisites
 
-- Windows 10/11 with **Hyper-V** enabled (for WHVP)
+- Windows 10/11 with **Windows Hypervisor Platform** enabled (for WHVP)
 - Visual Studio 2022+ with C++20 support
 - CMake 3.21+
 - WSL2 or a Linux environment (for building disk images)
