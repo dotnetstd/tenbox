@@ -13,7 +13,7 @@ static Lang g_current_lang = Lang::kEnglish;
 
 // English strings; each key explicitly bound to its string (no order dependency)
 static const std::unordered_map<S, const char*> kStringsEn = {
-    {S::kAppTitle, "TenBox VM Manager"},
+    {S::kAppTitle, "OpenClaw / CoPaw Deployment Assistant - TenBox"},
     {S::kMenuManager, "Manager"},
     {S::kMenuVm, "VM"},
     {S::kMenuNewVm, "New VM\tCtrl+N"},
@@ -209,7 +209,7 @@ static const std::unordered_map<S, const char*> kStringsEn = {
 
 // Simplified Chinese strings; each key explicitly bound (no order dependency)
 static const std::unordered_map<S, const char*> kStringsZhCN = {
-    {S::kAppTitle, "TenBox 虚拟机管理器"},
+    {S::kAppTitle, "本地龙虾助手 - TenBox"},
     {S::kMenuManager, "管理"},
     {S::kMenuVm, "虚拟机"},
     {S::kMenuNewVm, "新建虚拟机\tCtrl+N"},
