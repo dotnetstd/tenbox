@@ -37,12 +37,14 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, watch } from 'vue'
+
+/* global __APP_VERSION__, __APP_DOWNLOAD_URL__ */
 import { useI18n } from 'vue-i18n'
 
 const { tm, locale } = useI18n()
 
-const downloadUrl = ref('https://files.xiaozhi.me/tenbox/releases/TenBox_0.2.5.msi')
-const latestVersion = ref('0.2.5')
+const downloadUrl = __APP_DOWNLOAD_URL__
+const latestVersion = __APP_VERSION__
 
 const displayText = ref('')
 let timerId = null
@@ -103,22 +105,8 @@ function reset() {
   timerId = setTimeout(tick, TYPING_SPEED)
 }
 
-async function fetchVersionInfo() {
-  try {
-    const res = await fetch('/api/version.json')
-    if (res.ok) {
-      const data = await res.json()
-      if (data.download_url) downloadUrl.value = data.download_url
-      if (data.latest_version) latestVersion.value = data.latest_version
-    }
-  } catch {
-    // fall back to defaults
-  }
-}
-
 onMounted(() => {
   reset()
-  fetchVersionInfo()
 })
 
 onUnmounted(() => {

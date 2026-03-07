@@ -9,6 +9,15 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 
+// Windows SDK <iprtrmib.h> (via <iphlpapi.h>) defines IP_STATS, ICMP_STATS,
+// TCP_STATS, UDP_STATS, IP6_STATS as enum values.  lwIP opt.h redefines them
+// as preprocessor macros.  Undefine the Windows versions to avoid C4005.
+#undef IP_STATS
+#undef ICMP_STATS
+#undef TCP_STATS
+#undef UDP_STATS
+#undef IP6_STATS
+
 extern "C" {
 #include "lwip/init.h"
 #include "lwip/tcp.h"

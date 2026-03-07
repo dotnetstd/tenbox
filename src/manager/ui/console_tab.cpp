@@ -8,7 +8,7 @@ void ConsoleTab::Create(HWND parent, HINSTANCE hinst, HFONT mono_font, HFONT ui_
         WS_CHILD | WS_VISIBLE | WS_VSCROLL |
         ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
         0, 0, 0, 0, parent,
-        reinterpret_cast<HMENU>(kConsoleId), hinst, nullptr);
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kConsoleId)), hinst, nullptr);
     SendMessage(console_, EM_SETLIMITTEXT,
         static_cast<WPARAM>(kMaxLen * 2), 0);
     SendMessage(console_, WM_SETFONT,
@@ -17,7 +17,7 @@ void ConsoleTab::Create(HWND parent, HINSTANCE hinst, HFONT mono_font, HFONT ui_
     console_in_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
         0, 0, 0, 0, parent,
-        reinterpret_cast<HMENU>(kInputId), hinst, nullptr);
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kInputId)), hinst, nullptr);
     SendMessage(console_in_, WM_SETFONT,
         reinterpret_cast<WPARAM>(mono_font), FALSE);
     auto placeholder = i18n::tr_w(i18n::S::kConsolePlaceholder);
@@ -27,7 +27,7 @@ void ConsoleTab::Create(HWND parent, HINSTANCE hinst, HFONT mono_font, HFONT ui_
     send_btn_ = CreateWindowExW(0, L"BUTTON", i18n::tr_w(i18n::S::kSend).c_str(),
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         0, 0, 0, 0, parent,
-        reinterpret_cast<HMENU>(kSendBtnId), hinst, nullptr);
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kSendBtnId)), hinst, nullptr);
     SendMessage(send_btn_, WM_SETFONT,
         reinterpret_cast<WPARAM>(ui_font), FALSE);
 

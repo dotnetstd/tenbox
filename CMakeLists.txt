@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 cmake_policy(SET CMP0091 NEW)
+cmake_policy(SET CMP0169 OLD)
 project(TenBox VERSION 0.2.6 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -80,6 +81,7 @@ configure_file(src/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/version.h)
 FetchContent_Declare(
     json
     URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(json)
 
