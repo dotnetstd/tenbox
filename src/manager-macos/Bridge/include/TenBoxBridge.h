@@ -1,0 +1,50 @@
+#pragma once
+
+#import <Foundation/Foundation.h>
+#import "TenBoxIPC.h"
+
+NS_ASSUME_NONNULL_BEGIN
+
+@interface TBVmInfo : NSObject
+@property (nonatomic, copy) NSString *vmId;
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, copy) NSString *kernelPath;
+@property (nonatomic, copy) NSString *initrdPath;
+@property (nonatomic, copy) NSString *diskPath;
+@property (nonatomic, assign) NSInteger memoryMb;
+@property (nonatomic, assign) NSInteger cpuCount;
+@property (nonatomic, copy) NSString *state;
+@property (nonatomic, assign) BOOL netLinkUp;
+@end
+
+@interface TBVmCreateConfig : NSObject
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, copy) NSString *kernelPath;
+@property (nonatomic, copy) NSString *initrdPath;
+@property (nonatomic, copy) NSString *diskPath;
+@property (nonatomic, assign) NSInteger memoryMb;
+@property (nonatomic, assign) NSInteger cpuCount;
+@property (nonatomic, copy) NSString *cmdline;
+@property (nonatomic, assign) BOOL netEnabled;
+@end
+
+@interface TBBridge : NSObject
+
+- (NSArray<TBVmInfo *> *)getVmList;
+- (BOOL)createVmWithConfig:(TBVmCreateConfig *)config;
+- (BOOL)deleteVmWithId:(NSString *)vmId;
+- (BOOL)startVmWithId:(NSString *)vmId;
+- (BOOL)stopVmWithId:(NSString *)vmId;
+- (void)rebootVmWithId:(NSString *)vmId;
+- (void)shutdownVmWithId:(NSString *)vmId;
+
+// Wait for the runtime process to connect (up to timeout seconds).
+- (BOOL)waitForRuntimeConnection:(NSString *)vmId timeout:(NSTimeInterval)timeout;
+
+// Take the accepted socket fd for a VM. Returns -1 if not available.
+// Ownership is transferred; caller must close the fd.
+- (int)takeAcceptedFdForVm:(NSString *)vmId;
+
+@end
+
+NS_ASSUME_NONNULL_END

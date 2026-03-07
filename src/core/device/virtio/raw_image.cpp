@@ -1,5 +1,10 @@
 #include "core/device/virtio/raw_image.h"
 
+#ifndef _WIN32
+#define _fseeki64 fseeko
+#define _ftelli64 ftello
+#endif
+
 RawDiskImage::~RawDiskImage() {
     if (file_) {
         fclose(file_);

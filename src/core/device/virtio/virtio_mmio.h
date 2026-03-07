@@ -30,9 +30,11 @@ public:
     static constexpr uint32_t kVendorId = 0x554D4551; // "QEMU" (conventional)
 
     using IrqCallback = std::function<void()>;
+    using IrqLevelCallback = std::function<void(bool asserted)>;
 
     void Init(VirtioDeviceOps* ops, const GuestMemMap& mem);
     void SetIrqCallback(IrqCallback cb) { irq_callback_ = std::move(cb); }
+    void SetIrqLevelCallback(IrqLevelCallback cb) { irq_level_callback_ = std::move(cb); }
 
     void MmioRead(uint64_t offset, uint8_t size, uint64_t* value) override;
     void MmioWrite(uint64_t offset, uint8_t size, uint64_t value) override;
@@ -87,6 +89,7 @@ private:
     VirtioDeviceOps* ops_ = nullptr;
     GuestMemMap mem_;
     IrqCallback irq_callback_;
+    IrqLevelCallback irq_level_callback_;
 
     // Transport state
     uint32_t status_ = 0;

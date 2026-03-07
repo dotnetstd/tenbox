@@ -1,13 +1,7 @@
+# Common sources shared by all platforms
 set(TENBOX_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/core/vmm/vm.cpp
     ${CMAKE_SOURCE_DIR}/src/core/vmm/address_space.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/arch/x86_64/boot.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/device/serial/uart_16550.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/device/timer/i8254_pit.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/device/rtc/cmos_rtc.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/device/irq/ioapic.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/arch/x86_64/acpi.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/device/acpi/acpi_pm.cpp
     ${CMAKE_SOURCE_DIR}/src/core/device/virtio/virtqueue.cpp
     ${CMAKE_SOURCE_DIR}/src/core/device/virtio/virtio_mmio.cpp
     ${CMAKE_SOURCE_DIR}/src/core/device/virtio/virtio_blk.cpp
@@ -24,6 +18,27 @@ set(TENBOX_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/core/guest_agent/guest_agent_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/core/net/net_backend.cpp
 )
+
+# Architecture-specific sources
+if(WIN32 OR CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    list(APPEND TENBOX_CORE_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/core/arch/x86_64/boot.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/arch/x86_64/acpi.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/arch/x86_64/x86_machine.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/device/serial/uart_16550.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/device/timer/i8254_pit.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/device/rtc/cmos_rtc.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/device/irq/ioapic.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/device/acpi/acpi_pm.cpp
+    )
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+    list(APPEND TENBOX_CORE_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/core/arch/aarch64/boot.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/arch/aarch64/fdt_builder.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/arch/aarch64/pl011.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/arch/aarch64/aarch64_machine.cpp
+    )
+endif()
 
 add_library(tenbox_core STATIC ${TENBOX_CORE_SOURCES})
 target_include_directories(tenbox_core

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
+#ifdef _WIN32
 static std::wstring Utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) return {};
     int len = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), nullptr, 0);
@@ -20,6 +21,23 @@ static std::string WideToUtf8(const std::wstring& wide) {
     WideCharToMultiByte(CP_UTF8, 0, wide.data(), (int)wide.size(), utf8.data(), len, nullptr, nullptr);
     return utf8;
 }
+#else
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/statvfs.h>
+#include <sys/time.h>
+#endif
+
+// Platform path separator
+#ifdef _WIN32
+static constexpr char kPathSep = '\\';
+#else
+static constexpr char kPathSep = '/';
+#endif
 
 // Virtual root inode number
 constexpr uint64_t VIRTUAL_ROOT_INODE = 1;
@@ -32,13 +50,12 @@ VirtioFsDevice::VirtioFsDevice(const std::string& mount_tag)
     config_.num_request_queues = 1;
     virtual_root_mtime_ = static_cast<uint64_t>(time(nullptr));
 
-    // Create virtual root inode (inode 1) - this is the virtual directory containing all shares
     InodeInfo root;
     root.inode = VIRTUAL_ROOT_INODE;
-    root.host_path = "";  // virtual, no host path
+    root.host_path = "";
     root.nlookup = 1;
     root.is_dir = true;
-    root.share_tag = "";  // empty means virtual root
+    root.share_tag = "";
     inodes_[VIRTUAL_ROOT_INODE] = root;
 
     LOG_INFO("VirtIO FS: mount_tag=%s (virtual root with dynamic shares)", mount_tag_.c_str());
@@ -47,8 +64,12 @@ VirtioFsDevice::VirtioFsDevice(const std::string& mount_tag)
 VirtioFsDevice::~VirtioFsDevice() {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& [fh, handle] : file_handles_) {
-        if (handle.handle != INVALID_HANDLE_VALUE) {
+        if (handle.handle != FS_INVALID_HANDLE) {
+#ifdef _WIN32
             CloseHandle(handle.handle);
+#else
+            ::close(handle.handle);
+#endif
         }
     }
     file_handles_.clear();
@@ -57,26 +78,34 @@ VirtioFsDevice::~VirtioFsDevice() {
 bool VirtioFsDevice::AddShare(const std::string& tag, const std::string& host_path, bool readonly) {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    // Check for duplicate tag
     if (shares_.find(tag) != shares_.end()) {
         LOG_ERROR("VirtIO FS: share tag '%s' already exists", tag.c_str());
         return false;
     }
 
-    // Validate host path exists
     std::string path = host_path;
+#ifdef _WIN32
     DWORD attrs = GetFileAttributesW(Utf8ToWide(path).c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
         LOG_ERROR("VirtIO FS: host path '%s' is not a valid directory", host_path.c_str());
         return false;
     }
 
-    // Normalize path (remove trailing backslash)
     while (path.size() > 3 && path.back() == '\\') {
         path.pop_back();
     }
+#else
+    struct stat st;
+    if (::stat(path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+        LOG_ERROR("VirtIO FS: host path '%s' is not a valid directory", host_path.c_str());
+        return false;
+    }
 
-    // Allocate inode for this share's root
+    while (path.size() > 1 && path.back() == '/') {
+        path.pop_back();
+    }
+#endif
+
     uint64_t share_root_inode = next_inode_++;
     
     ShareInfo share;
@@ -86,7 +115,6 @@ bool VirtioFsDevice::AddShare(const std::string& tag, const std::string& host_pa
     share.root_inode = share_root_inode;
     shares_[tag] = share;
 
-    // Create inode for share root
     InodeInfo share_root;
     share_root.inode = share_root_inode;
     share_root.host_path = path;
@@ -112,11 +140,14 @@ bool VirtioFsDevice::RemoveShare(const std::string& tag) {
         return false;
     }
 
-    // Close all file handles belonging to this share
     for (auto fh_it = file_handles_.begin(); fh_it != file_handles_.end(); ) {
         if (fh_it->second.share_tag == tag) {
-            if (fh_it->second.handle != INVALID_HANDLE_VALUE) {
+            if (fh_it->second.handle != FS_INVALID_HANDLE) {
+#ifdef _WIN32
                 CloseHandle(fh_it->second.handle);
+#else
+                ::close(fh_it->second.handle);
+#endif
             }
             fh_it = file_handles_.erase(fh_it);
         } else {
@@ -124,7 +155,6 @@ bool VirtioFsDevice::RemoveShare(const std::string& tag) {
         }
     }
 
-    // Remove all inodes belonging to this share
     for (auto inode_it = inodes_.begin(); inode_it != inodes_.end(); ) {
         if (inode_it->second.share_tag == tag) {
             path_to_inode_.erase(inode_it->second.host_path);
@@ -182,8 +212,12 @@ void VirtioFsDevice::OnStatusChange(uint32_t new_status) {
         LOG_INFO("VirtIO FS: device reset");
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& [fh, handle] : file_handles_) {
-            if (handle.handle != INVALID_HANDLE_VALUE) {
+            if (handle.handle != FS_INVALID_HANDLE) {
+#ifdef _WIN32
                 CloseHandle(handle.handle);
+#else
+                ::close(handle.handle);
+#endif
             }
         }
         file_handles_.clear();
@@ -192,10 +226,6 @@ void VirtioFsDevice::OnStatusChange(uint32_t new_status) {
 }
 
 void VirtioFsDevice::OnQueueNotify(uint32_t queue_idx, VirtQueue& vq) {
-    // Virtiofs queues:
-    //   Queue 0: hiprio queue (for FUSE_INTERRUPT, etc.)
-    //   Queue 1: request queue (for FUSE_INIT, FUSE_LOOKUP, etc.)
-    // We handle both queues the same way
     if (queue_idx > 1) return;
 
     uint16_t head;
@@ -380,9 +410,7 @@ void VirtioFsDevice::HandleLookup(const FuseInHeader* in_hdr, const uint8_t* in_
     
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // Special handling for virtual root directory
     if (in_hdr->nodeid == VIRTUAL_ROOT_INODE) {
-        // Looking up a share tag in the virtual root
         auto it = shares_.find(name);
         if (it == shares_.end()) {
             WriteErrorResponse(out_buf, in_hdr->unique, FUSE_ENOENT);
@@ -416,7 +444,6 @@ void VirtioFsDevice::HandleLookup(const FuseInHeader* in_hdr, const uint8_t* in_
         return;
     }
 
-    // Normal lookup in a real directory
     auto inode_it = inodes_.find(in_hdr->nodeid);
     if (inode_it == inodes_.end()) {
         WriteErrorResponse(out_buf, in_hdr->unique, FUSE_ENOENT);
@@ -424,17 +451,25 @@ void VirtioFsDevice::HandleLookup(const FuseInHeader* in_hdr, const uint8_t* in_
     }
 
     const InodeInfo& parent = inode_it->second;
-    std::string child_path = parent.host_path + "\\" + name;
+    std::string child_path = parent.host_path + kPathSep + name;
     
+    bool is_dir;
+#ifdef _WIN32
     DWORD attrs = GetFileAttributesW(Utf8ToWide(child_path).c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) {
-        WriteErrorResponse(out_buf, in_hdr->unique, WindowsErrorToFuse(GetLastError()));
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
         return;
     }
-
-    bool is_dir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    is_dir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+    struct stat st;
+    if (::stat(child_path.c_str(), &st) != 0) {
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
+        return;
+    }
+    is_dir = S_ISDIR(st.st_mode);
+#endif
     
-    // Create or get inode
     auto path_it = path_to_inode_.find(child_path);
     uint64_t inode;
     if (path_it != path_to_inode_.end()) {
@@ -486,7 +521,6 @@ void VirtioFsDevice::HandleForget(const FuseInHeader* in_hdr, const uint8_t* in_
     
     std::lock_guard<std::mutex> lock(mutex_);
     
-    // Don't forget virtual root or share roots
     if (in_hdr->nodeid == VIRTUAL_ROOT_INODE) return;
     for (const auto& [tag, share] : shares_) {
         if (share.root_inode == in_hdr->nodeid) return;
@@ -512,7 +546,6 @@ void VirtioFsDevice::HandleGetAttr(const FuseInHeader* in_hdr, const uint8_t*,
     memset(&attr_out, 0, sizeof(attr_out));
     attr_out.attr_valid = 1;
 
-    // Special handling for virtual root
     if (in_hdr->nodeid == VIRTUAL_ROOT_INODE) {
         attr_out.attr_valid = 0;
         int32_t err = FillVirtualRootAttr(&attr_out.attr);
@@ -521,7 +554,6 @@ void VirtioFsDevice::HandleGetAttr(const FuseInHeader* in_hdr, const uint8_t*,
             return;
         }
     } else {
-        // Check if it's a share root
         for (const auto& [tag, share] : shares_) {
             if (share.root_inode == in_hdr->nodeid) {
                 attr_out.attr_valid = 0;
@@ -534,22 +566,23 @@ void VirtioFsDevice::HandleGetAttr(const FuseInHeader* in_hdr, const uint8_t*,
             }
         }
 
-        // Normal file/directory
-        auto it = inodes_.find(in_hdr->nodeid);
-        if (it == inodes_.end()) {
-            WriteErrorResponse(out_buf, in_hdr->unique, FUSE_ENOENT);
-            return;
-        }
-
-        bool readonly = false;
         {
-            auto sit = shares_.find(it->second.share_tag);
-            if (sit != shares_.end()) readonly = sit->second.readonly;
-        }
-        int32_t err = FillAttr(it->second.host_path, &attr_out.attr, in_hdr->nodeid, readonly);
-        if (err != FUSE_OK) {
-            WriteErrorResponse(out_buf, in_hdr->unique, err);
-            return;
+            auto it = inodes_.find(in_hdr->nodeid);
+            if (it == inodes_.end()) {
+                WriteErrorResponse(out_buf, in_hdr->unique, FUSE_ENOENT);
+                return;
+            }
+
+            bool readonly = false;
+            {
+                auto sit = shares_.find(it->second.share_tag);
+                if (sit != shares_.end()) readonly = sit->second.readonly;
+            }
+            int32_t err = FillAttr(it->second.host_path, &attr_out.attr, in_hdr->nodeid, readonly);
+            if (err != FUSE_OK) {
+                WriteErrorResponse(out_buf, in_hdr->unique, err);
+                return;
+            }
         }
     }
 
@@ -565,7 +598,6 @@ send_response:
 
 void VirtioFsDevice::HandleSetAttr(const FuseInHeader* in_hdr, const uint8_t* in_data,
                                     std::vector<uint8_t>& out_buf) {
-    // Cannot modify virtual root
     if (in_hdr->nodeid == VIRTUAL_ROOT_INODE) {
         WriteErrorResponse(out_buf, in_hdr->unique, FUSE_EACCES);
         return;
@@ -585,8 +617,8 @@ void VirtioFsDevice::HandleSetAttr(const FuseInHeader* in_hdr, const uint8_t* in
         return;
     }
 
-    // Handle size truncation
     if (setattr_in->valid & FATTR_SIZE) {
+#ifdef _WIN32
         HANDLE h = CreateFileW(Utf8ToWide(path).c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h != INVALID_HANDLE_VALUE) {
@@ -596,10 +628,13 @@ void VirtioFsDevice::HandleSetAttr(const FuseInHeader* in_hdr, const uint8_t* in
             SetEndOfFile(h);
             CloseHandle(h);
         }
+#else
+        ::truncate(path.c_str(), static_cast<off_t>(setattr_in->size));
+#endif
     }
 
-    // Handle time updates
     if ((setattr_in->valid & FATTR_ATIME) || (setattr_in->valid & FATTR_MTIME)) {
+#ifdef _WIN32
         HANDLE h = CreateFileW(Utf8ToWide(path).c_str(), FILE_WRITE_ATTRIBUTES, 
                                FILE_SHARE_READ | FILE_SHARE_WRITE,
                                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
@@ -625,6 +660,32 @@ void VirtioFsDevice::HandleSetAttr(const FuseInHeader* in_hdr, const uint8_t* in
             SetFileTime(h, nullptr, patime, pmtime);
             CloseHandle(h);
         }
+#else
+        struct timeval times[2];
+        times[0].tv_sec = static_cast<time_t>(
+            (setattr_in->valid & FATTR_ATIME) ? setattr_in->atime : 0);
+        times[0].tv_usec = (setattr_in->valid & FATTR_ATIME) ?
+            static_cast<suseconds_t>(setattr_in->atimensec / 1000) : 0;
+        times[1].tv_sec = static_cast<time_t>(
+            (setattr_in->valid & FATTR_MTIME) ? setattr_in->mtime : 0);
+        times[1].tv_usec = (setattr_in->valid & FATTR_MTIME) ?
+            static_cast<suseconds_t>(setattr_in->mtimensec / 1000) : 0;
+
+        if (!((setattr_in->valid & FATTR_ATIME) && (setattr_in->valid & FATTR_MTIME))) {
+            struct stat st;
+            if (::stat(path.c_str(), &st) == 0) {
+                if (!(setattr_in->valid & FATTR_ATIME)) {
+                    times[0].tv_sec = st.st_atimespec.tv_sec;
+                    times[0].tv_usec = static_cast<suseconds_t>(st.st_atimespec.tv_nsec / 1000);
+                }
+                if (!(setattr_in->valid & FATTR_MTIME)) {
+                    times[1].tv_sec = st.st_mtimespec.tv_sec;
+                    times[1].tv_usec = static_cast<suseconds_t>(st.st_mtimespec.tv_nsec / 1000);
+                }
+            }
+        }
+        ::utimes(path.c_str(), times);
+#endif
     }
 
     HandleGetAttr(in_hdr, nullptr, out_buf);
@@ -642,10 +703,6 @@ void VirtioFsDevice::HandleOpen(const FuseInHeader* in_hdr, const uint8_t* in_da
 
     std::string share_tag = NodeIdToShareTag(in_hdr->nodeid);
     
-    DWORD access = 0;
-    DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-    DWORD disposition = OPEN_EXISTING;
-
     uint32_t flags = open_in->flags;
     bool write_access = (flags & 0x3) != 0;
     
@@ -653,6 +710,11 @@ void VirtioFsDevice::HandleOpen(const FuseInHeader* in_hdr, const uint8_t* in_da
         WriteErrorResponse(out_buf, in_hdr->unique, FUSE_EROFS);
         return;
     }
+
+#ifdef _WIN32
+    DWORD access = 0;
+    DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    DWORD disposition = OPEN_EXISTING;
 
     if ((flags & 0x3) == 0) {
         access = GENERIC_READ;
@@ -665,9 +727,25 @@ void VirtioFsDevice::HandleOpen(const FuseInHeader* in_hdr, const uint8_t* in_da
     HANDLE h = CreateFileW(Utf8ToWide(path).c_str(), access, share, nullptr, disposition,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        WriteErrorResponse(out_buf, in_hdr->unique, WindowsErrorToFuse(GetLastError()));
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
         return;
     }
+#else
+    int oflags = 0;
+    if ((flags & 0x3) == 0) {
+        oflags = O_RDONLY;
+    } else if ((flags & 0x3) == 1) {
+        oflags = O_WRONLY;
+    } else {
+        oflags = O_RDWR;
+    }
+
+    int h = ::open(path.c_str(), oflags);
+    if (h < 0) {
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
+        return;
+    }
+#endif
 
     uint64_t fh = AllocFileHandle(h, false, path, share_tag);
 
@@ -690,13 +768,14 @@ void VirtioFsDevice::HandleRead(const FuseInHeader* in_hdr, const uint8_t* in_da
     auto* read_in = reinterpret_cast<const FuseReadIn*>(in_data);
     
     FileHandle* fh = GetFileHandle(read_in->fh);
-    if (!fh || fh->handle == INVALID_HANDLE_VALUE) {
+    if (!fh || fh->handle == FS_INVALID_HANDLE) {
         WriteErrorResponse(out_buf, in_hdr->unique, FUSE_ENOENT);
         return;
     }
 
     std::vector<uint8_t> data(read_in->size);
     
+#ifdef _WIN32
     LARGE_INTEGER offset;
     offset.QuadPart = static_cast<LONGLONG>(read_in->offset);
     
@@ -708,13 +787,21 @@ void VirtioFsDevice::HandleRead(const FuseInHeader* in_hdr, const uint8_t* in_da
     if (!ReadFile(fh->handle, data.data(), read_in->size, &bytes_read, &ov)) {
         DWORD err = GetLastError();
         if (err != ERROR_HANDLE_EOF) {
-            WriteErrorResponse(out_buf, in_hdr->unique, WindowsErrorToFuse(err));
+            WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
             return;
         }
     }
+#else
+    ssize_t bytes_read = ::pread(fh->handle, data.data(), read_in->size,
+                                 static_cast<off_t>(read_in->offset));
+    if (bytes_read < 0) {
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
+        return;
+    }
+#endif
 
     FuseOutHeader out_hdr;
-    out_hdr.len = sizeof(FuseOutHeader) + bytes_read;
+    out_hdr.len = sizeof(FuseOutHeader) + static_cast<uint32_t>(bytes_read);
     out_hdr.error = 0;
     out_hdr.unique = in_hdr->unique;
 
@@ -730,7 +817,7 @@ void VirtioFsDevice::HandleWrite(const FuseInHeader* in_hdr, const uint8_t* in_d
     auto* write_in = reinterpret_cast<const FuseWriteIn*>(in_data);
     
     FileHandle* fh = GetFileHandle(write_in->fh);
-    if (!fh || fh->handle == INVALID_HANDLE_VALUE) {
+    if (!fh || fh->handle == FS_INVALID_HANDLE) {
         WriteErrorResponse(out_buf, in_hdr->unique, FUSE_ENOENT);
         return;
     }
@@ -747,6 +834,7 @@ void VirtioFsDevice::HandleWrite(const FuseInHeader* in_hdr, const uint8_t* in_d
         data_len = write_in->size;
     }
 
+#ifdef _WIN32
     LARGE_INTEGER offset;
     offset.QuadPart = static_cast<LONGLONG>(write_in->offset);
     
@@ -756,14 +844,22 @@ void VirtioFsDevice::HandleWrite(const FuseInHeader* in_hdr, const uint8_t* in_d
     
     DWORD bytes_written = 0;
     if (!WriteFile(fh->handle, write_data, write_in->size, &bytes_written, &ov)) {
-        WriteErrorResponse(out_buf, in_hdr->unique, WindowsErrorToFuse(GetLastError()));
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
         return;
     }
+#else
+    ssize_t bytes_written = ::pwrite(fh->handle, write_data, write_in->size,
+                                     static_cast<off_t>(write_in->offset));
+    if (bytes_written < 0) {
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
+        return;
+    }
+#endif
 
     FuseOutHeader out_hdr;
     FuseWriteOut write_out;
     memset(&write_out, 0, sizeof(write_out));
-    write_out.size = bytes_written;
+    write_out.size = static_cast<uint32_t>(bytes_written);
 
     out_hdr.len = sizeof(FuseOutHeader) + sizeof(FuseWriteOut);
     out_hdr.error = 0;
@@ -786,7 +882,6 @@ void VirtioFsDevice::HandleOpenDir(const FuseInHeader* in_hdr, const uint8_t*,
     std::string path;
     std::string share_tag;
 
-    // Virtual root is always openable
     if (in_hdr->nodeid == VIRTUAL_ROOT_INODE) {
         path = "";
         share_tag = "";
@@ -799,19 +894,31 @@ void VirtioFsDevice::HandleOpenDir(const FuseInHeader* in_hdr, const uint8_t*,
         path = it->second.host_path;
         share_tag = it->second.share_tag;
 
+#ifdef _WIN32
         DWORD attrs = GetFileAttributesW(Utf8ToWide(path).c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES) {
-            WriteErrorResponse(out_buf, in_hdr->unique, WindowsErrorToFuse(GetLastError()));
+            WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
             return;
         }
         if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
             WriteErrorResponse(out_buf, in_hdr->unique, FUSE_ENOTDIR);
             return;
         }
+#else
+        struct stat st;
+        if (::stat(path.c_str(), &st) != 0) {
+            WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
+            return;
+        }
+        if (!S_ISDIR(st.st_mode)) {
+            WriteErrorResponse(out_buf, in_hdr->unique, FUSE_ENOTDIR);
+            return;
+        }
+#endif
     }
 
     uint64_t fh = next_fh_++;
-    file_handles_[fh] = {INVALID_HANDLE_VALUE, true, path, share_tag};
+    file_handles_[fh] = {FS_INVALID_HANDLE, true, path, share_tag};
 
     FuseOutHeader out_hdr;
     FuseOpenOut open_out;
@@ -842,7 +949,6 @@ void VirtioFsDevice::HandleReadDir(const FuseInHeader* in_hdr, const uint8_t* in
     std::vector<uint8_t> dir_buf;
     uint64_t entry_offset = 0;
 
-    // Virtual root directory - list all shares
     if (fh->path.empty() && fh->share_tag.empty()) {
         for (const auto& [tag, share] : shares_) {
             if (entry_offset < read_in->offset) {
@@ -873,13 +979,13 @@ void VirtioFsDevice::HandleReadDir(const FuseInHeader* in_hdr, const uint8_t* in
             entry_offset++;
         }
     } else {
-        // Real directory
+#ifdef _WIN32
         std::wstring search_path = Utf8ToWide(fh->path + "\\*");
         
         WIN32_FIND_DATAW fdata;
         HANDLE hFind = FindFirstFileW(search_path.c_str(), &fdata);
         if (hFind == INVALID_HANDLE_VALUE) {
-            WriteErrorResponse(out_buf, in_hdr->unique, WindowsErrorToFuse(GetLastError()));
+            WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
             return;
         }
 
@@ -905,7 +1011,6 @@ void VirtioFsDevice::HandleReadDir(const FuseInHeader* in_hdr, const uint8_t* in
             std::string full_path = fh->path + "\\" + name;
             bool is_dir = (fdata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
             
-            // Get or create inode
             auto path_it = path_to_inode_.find(full_path);
             uint64_t inode;
             if (path_it != path_to_inode_.end()) {
@@ -936,6 +1041,73 @@ void VirtioFsDevice::HandleReadDir(const FuseInHeader* in_hdr, const uint8_t* in
         } while (FindNextFileW(hFind, &fdata));
 
         FindClose(hFind);
+#else
+        DIR* dp = ::opendir(fh->path.c_str());
+        if (!dp) {
+            WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
+            return;
+        }
+
+        struct dirent* de;
+        while ((de = ::readdir(dp)) != nullptr) {
+            std::string name(de->d_name);
+
+            if (entry_offset < read_in->offset) {
+                entry_offset++;
+                continue;
+            }
+
+            uint32_t name_len = static_cast<uint32_t>(name.size());
+            uint32_t entry_size = sizeof(FuseDirent) + name_len;
+            entry_size = (entry_size + 7) & ~7;
+
+            if (dir_buf.size() + entry_size > read_in->size) {
+                break;
+            }
+
+            FuseDirent fuse_dirent;
+            memset(&fuse_dirent, 0, sizeof(fuse_dirent));
+
+            std::string full_path = fh->path + "/" + name;
+            bool is_dir = (de->d_type == DT_DIR);
+            if (de->d_type == DT_UNKNOWN) {
+                struct stat st;
+                if (::stat(full_path.c_str(), &st) == 0) {
+                    is_dir = S_ISDIR(st.st_mode);
+                }
+            }
+
+            auto path_it = path_to_inode_.find(full_path);
+            uint64_t inode;
+            if (path_it != path_to_inode_.end()) {
+                inode = path_it->second;
+            } else {
+                inode = next_inode_++;
+                InodeInfo info;
+                info.inode = inode;
+                info.host_path = full_path;
+                info.nlookup = 0;
+                info.is_dir = is_dir;
+                info.share_tag = fh->share_tag;
+                inodes_[inode] = info;
+                path_to_inode_[full_path] = inode;
+            }
+
+            fuse_dirent.ino = inode;
+            fuse_dirent.off = entry_offset + 1;
+            fuse_dirent.namelen = name_len;
+            fuse_dirent.type = is_dir ? (FUSE_S_IFDIR >> 12) : (FUSE_S_IFREG >> 12);
+
+            size_t old_size = dir_buf.size();
+            dir_buf.resize(old_size + entry_size);
+            memcpy(dir_buf.data() + old_size, &fuse_dirent, sizeof(fuse_dirent));
+            memcpy(dir_buf.data() + old_size + sizeof(fuse_dirent), name.c_str(), name_len);
+
+            entry_offset++;
+        }
+
+        ::closedir(dp);
+#endif
     }
 
     FuseOutHeader out_hdr;
@@ -965,7 +1137,6 @@ void VirtioFsDevice::HandleReadDirPlus(const FuseInHeader* in_hdr, const uint8_t
     std::vector<uint8_t> dir_buf;
     uint64_t entry_offset = 0;
 
-    // Virtual root directory - list all shares
     if (fh->path.empty() && fh->share_tag.empty()) {
         for (const auto& [tag, share] : shares_) {
             if (entry_offset < read_in->offset) {
@@ -1003,19 +1174,19 @@ void VirtioFsDevice::HandleReadDirPlus(const FuseInHeader* in_hdr, const uint8_t
             entry_offset++;
         }
     } else {
-        // Real directory
-        std::wstring search_path = Utf8ToWide(fh->path + "\\*");
-
         bool share_readonly = false;
         {
             auto sit = shares_.find(fh->share_tag);
             if (sit != shares_.end()) share_readonly = sit->second.readonly;
         }
+
+#ifdef _WIN32
+        std::wstring search_path = Utf8ToWide(fh->path + "\\*");
         
         WIN32_FIND_DATAW fdata;
         HANDLE hFind = FindFirstFileW(search_path.c_str(), &fdata);
         if (hFind == INVALID_HANDLE_VALUE) {
-            WriteErrorResponse(out_buf, in_hdr->unique, WindowsErrorToFuse(GetLastError()));
+            WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
             return;
         }
 
@@ -1038,7 +1209,6 @@ void VirtioFsDevice::HandleReadDirPlus(const FuseInHeader* in_hdr, const uint8_t
             std::string full_path = fh->path + "\\" + name;
             bool is_dir = (fdata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
             
-            // Get or create inode
             auto path_it = path_to_inode_.find(full_path);
             uint64_t inode;
             if (path_it != path_to_inode_.end()) {
@@ -1078,6 +1248,79 @@ void VirtioFsDevice::HandleReadDirPlus(const FuseInHeader* in_hdr, const uint8_t
         } while (FindNextFileW(hFind, &fdata));
 
         FindClose(hFind);
+#else
+        DIR* dp = ::opendir(fh->path.c_str());
+        if (!dp) {
+            WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
+            return;
+        }
+
+        struct dirent* de;
+        while ((de = ::readdir(dp)) != nullptr) {
+            std::string name(de->d_name);
+
+            if (entry_offset < read_in->offset) {
+                entry_offset++;
+                continue;
+            }
+
+            uint32_t name_len = static_cast<uint32_t>(name.size());
+            uint32_t entry_size = sizeof(FuseDirentplus) + name_len;
+            entry_size = (entry_size + 7) & ~7;
+
+            if (dir_buf.size() + entry_size > read_in->size) {
+                break;
+            }
+
+            std::string full_path = fh->path + "/" + name;
+            bool is_dir = (de->d_type == DT_DIR);
+            if (de->d_type == DT_UNKNOWN) {
+                struct stat st;
+                if (::stat(full_path.c_str(), &st) == 0) {
+                    is_dir = S_ISDIR(st.st_mode);
+                }
+            }
+
+            auto path_it = path_to_inode_.find(full_path);
+            uint64_t inode;
+            if (path_it != path_to_inode_.end()) {
+                inode = path_it->second;
+            } else {
+                inode = next_inode_++;
+                InodeInfo info;
+                info.inode = inode;
+                info.host_path = full_path;
+                info.nlookup = 0;
+                info.is_dir = is_dir;
+                info.share_tag = fh->share_tag;
+                inodes_[inode] = info;
+                path_to_inode_[full_path] = inode;
+            }
+
+            FuseDirentplus direntplus;
+            memset(&direntplus, 0, sizeof(direntplus));
+
+            direntplus.entry_out.nodeid = inode;
+            direntplus.entry_out.generation = 1;
+            direntplus.entry_out.entry_valid = 1;
+            direntplus.entry_out.attr_valid = 1;
+            FillAttr(full_path, &direntplus.entry_out.attr, inode, share_readonly);
+
+            direntplus.dirent.ino = inode;
+            direntplus.dirent.off = entry_offset + 1;
+            direntplus.dirent.namelen = name_len;
+            direntplus.dirent.type = is_dir ? (FUSE_S_IFDIR >> 12) : (FUSE_S_IFREG >> 12);
+
+            size_t old_size = dir_buf.size();
+            dir_buf.resize(old_size + entry_size);
+            memcpy(dir_buf.data() + old_size, &direntplus, sizeof(direntplus));
+            memcpy(dir_buf.data() + old_size + sizeof(direntplus), name.c_str(), name_len);
+
+            entry_offset++;
+        }
+
+        ::closedir(dp);
+#endif
     }
 
     FuseOutHeader out_hdr;
@@ -1102,7 +1345,6 @@ void VirtioFsDevice::HandleStatFs(const FuseInHeader* in_hdr, std::vector<uint8_
     FuseStatfsOut statfs_out;
     memset(&statfs_out, 0, sizeof(statfs_out));
 
-    // For virtual root, return aggregated stats or reasonable defaults
     std::lock_guard<std::mutex> lock(mutex_);
     
     uint64_t total_blocks = 0;
@@ -1111,8 +1353,8 @@ void VirtioFsDevice::HandleStatFs(const FuseInHeader* in_hdr, std::vector<uint8_
     uint64_t block_size = 4096;
     bool got_stats = false;
 
-    // Try to get stats from the first share, or aggregate
     for (const auto& [tag, share] : shares_) {
+#ifdef _WIN32
         ULARGE_INTEGER free_bytes, total_bytes, total_free;
         if (GetDiskFreeSpaceExW(Utf8ToWide(share.host_path).c_str(), &free_bytes, &total_bytes, &total_free)) {
             if (!got_stats) {
@@ -1121,12 +1363,24 @@ void VirtioFsDevice::HandleStatFs(const FuseInHeader* in_hdr, std::vector<uint8_
                 avail_blocks = free_bytes.QuadPart / block_size;
                 got_stats = true;
             }
-            break;  // Use first share's disk stats
+            break;
         }
+#else
+        struct statvfs svfs;
+        if (::statvfs(share.host_path.c_str(), &svfs) == 0) {
+            if (!got_stats) {
+                block_size = svfs.f_frsize ? svfs.f_frsize : svfs.f_bsize;
+                total_blocks = svfs.f_blocks;
+                free_blocks = svfs.f_bfree;
+                avail_blocks = svfs.f_bavail;
+                got_stats = true;
+            }
+            break;
+        }
+#endif
     }
 
     if (!got_stats) {
-        // Default values if no shares
         total_blocks = 1000000;
         free_blocks = 1000000;
         avail_blocks = 1000000;
@@ -1152,7 +1406,6 @@ void VirtioFsDevice::HandleStatFs(const FuseInHeader* in_hdr, std::vector<uint8_
 
 void VirtioFsDevice::HandleCreate(const FuseInHeader* in_hdr, const uint8_t* in_data,
                                    uint32_t in_len, std::vector<uint8_t>& out_buf) {
-    // Cannot create in virtual root
     if (in_hdr->nodeid == VIRTUAL_ROOT_INODE) {
         WriteErrorResponse(out_buf, in_hdr->unique, FUSE_EACCES);
         return;
@@ -1174,17 +1427,26 @@ void VirtioFsDevice::HandleCreate(const FuseInHeader* in_hdr, const uint8_t* in_
         return;
     }
 
-    std::string file_path = parent_path + "\\" + std::string(name, name_len);
+    std::string file_path = parent_path + kPathSep + std::string(name, name_len);
 
+#ifdef _WIN32
     DWORD access = GENERIC_READ | GENERIC_WRITE;
     DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
     
     HANDLE h = CreateFileW(Utf8ToWide(file_path).c_str(), access, share, nullptr, 
                            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        WriteErrorResponse(out_buf, in_hdr->unique, WindowsErrorToFuse(GetLastError()));
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
         return;
     }
+#else
+    mode_t mode = create_in->mode ? (create_in->mode & 0777) : 0666;
+    int h = ::open(file_path.c_str(), O_CREAT | O_EXCL | O_RDWR, mode);
+    if (h < 0) {
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
+        return;
+    }
+#endif
 
     uint64_t inode = GetOrCreateInode(file_path, false, share_tag);
     uint64_t fh = AllocFileHandle(h, false, file_path, share_tag);
@@ -1215,7 +1477,6 @@ void VirtioFsDevice::HandleCreate(const FuseInHeader* in_hdr, const uint8_t* in_
 
 void VirtioFsDevice::HandleMkdir(const FuseInHeader* in_hdr, const uint8_t* in_data,
                                   uint32_t in_len, std::vector<uint8_t>& out_buf) {
-    // Cannot mkdir in virtual root
     if (in_hdr->nodeid == VIRTUAL_ROOT_INODE) {
         WriteErrorResponse(out_buf, in_hdr->unique, FUSE_EACCES);
         return;
@@ -1236,12 +1497,21 @@ void VirtioFsDevice::HandleMkdir(const FuseInHeader* in_hdr, const uint8_t* in_d
         return;
     }
 
-    std::string dir_path = parent_path + "\\" + std::string(name, name_len);
+    std::string dir_path = parent_path + kPathSep + std::string(name, name_len);
 
+#ifdef _WIN32
     if (!CreateDirectoryW(Utf8ToWide(dir_path).c_str(), nullptr)) {
-        WriteErrorResponse(out_buf, in_hdr->unique, WindowsErrorToFuse(GetLastError()));
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
         return;
     }
+#else
+    auto* mkdir_in = reinterpret_cast<const FuseMkdirIn*>(in_data);
+    mode_t mode = mkdir_in->mode ? (mkdir_in->mode & 0777) : 0777;
+    if (::mkdir(dir_path.c_str(), mode) != 0) {
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
+        return;
+    }
+#endif
 
     uint64_t inode = GetOrCreateInode(dir_path, true, share_tag);
 
@@ -1266,7 +1536,6 @@ void VirtioFsDevice::HandleMkdir(const FuseInHeader* in_hdr, const uint8_t* in_d
 
 void VirtioFsDevice::HandleUnlink(const FuseInHeader* in_hdr, const uint8_t* in_data,
                                    uint32_t in_len, std::vector<uint8_t>& out_buf) {
-    // Cannot unlink in virtual root
     if (in_hdr->nodeid == VIRTUAL_ROOT_INODE) {
         WriteErrorResponse(out_buf, in_hdr->unique, FUSE_EACCES);
         return;
@@ -1287,12 +1556,19 @@ void VirtioFsDevice::HandleUnlink(const FuseInHeader* in_hdr, const uint8_t* in_
         return;
     }
 
-    std::string file_path = parent_path + "\\" + name;
+    std::string file_path = parent_path + kPathSep + name;
 
+#ifdef _WIN32
     if (!DeleteFileW(Utf8ToWide(file_path).c_str())) {
-        WriteErrorResponse(out_buf, in_hdr->unique, WindowsErrorToFuse(GetLastError()));
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
         return;
     }
+#else
+    if (::unlink(file_path.c_str()) != 0) {
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
+        return;
+    }
+#endif
 
     RemoveInodeByPath(file_path);
     WriteErrorResponse(out_buf, in_hdr->unique, FUSE_OK);
@@ -1300,7 +1576,6 @@ void VirtioFsDevice::HandleUnlink(const FuseInHeader* in_hdr, const uint8_t* in_
 
 void VirtioFsDevice::HandleRmdir(const FuseInHeader* in_hdr, const uint8_t* in_data,
                                   uint32_t in_len, std::vector<uint8_t>& out_buf) {
-    // Cannot rmdir in virtual root (would remove a share)
     if (in_hdr->nodeid == VIRTUAL_ROOT_INODE) {
         WriteErrorResponse(out_buf, in_hdr->unique, FUSE_EACCES);
         return;
@@ -1321,12 +1596,19 @@ void VirtioFsDevice::HandleRmdir(const FuseInHeader* in_hdr, const uint8_t* in_d
         return;
     }
 
-    std::string dir_path = parent_path + "\\" + name;
+    std::string dir_path = parent_path + kPathSep + name;
 
+#ifdef _WIN32
     if (!RemoveDirectoryW(Utf8ToWide(dir_path).c_str())) {
-        WriteErrorResponse(out_buf, in_hdr->unique, WindowsErrorToFuse(GetLastError()));
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
         return;
     }
+#else
+    if (::rmdir(dir_path.c_str()) != 0) {
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
+        return;
+    }
+#endif
 
     RemoveInodeByPath(dir_path);
     WriteErrorResponse(out_buf, in_hdr->unique, FUSE_OK);
@@ -1334,7 +1616,6 @@ void VirtioFsDevice::HandleRmdir(const FuseInHeader* in_hdr, const uint8_t* in_d
 
 void VirtioFsDevice::HandleRename(const FuseInHeader* in_hdr, const uint8_t* in_data,
                                    uint32_t in_len, std::vector<uint8_t>& out_buf) {
-    // Cannot rename in virtual root
     if (in_hdr->nodeid == VIRTUAL_ROOT_INODE) {
         WriteErrorResponse(out_buf, in_hdr->unique, FUSE_EACCES);
         return;
@@ -1365,20 +1646,26 @@ void VirtioFsDevice::HandleRename(const FuseInHeader* in_hdr, const uint8_t* in_
         return;
     }
 
-    // Check if target is also writable
     std::string new_share_tag = NodeIdToShareTag(rename_in->newdir);
     if (IsShareReadonly(new_share_tag)) {
         WriteErrorResponse(out_buf, in_hdr->unique, FUSE_EROFS);
         return;
     }
 
-    std::string old_path = old_parent_path + "\\" + old_name;
-    std::string new_path = new_parent_path + "\\" + new_name;
+    std::string old_path = old_parent_path + kPathSep + old_name;
+    std::string new_path = new_parent_path + kPathSep + new_name;
 
+#ifdef _WIN32
     if (!MoveFileExW(Utf8ToWide(old_path).c_str(), Utf8ToWide(new_path).c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        WriteErrorResponse(out_buf, in_hdr->unique, WindowsErrorToFuse(GetLastError()));
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
         return;
     }
+#else
+    if (::rename(old_path.c_str(), new_path.c_str()) != 0) {
+        WriteErrorResponse(out_buf, in_hdr->unique, PlatformErrorToFuse());
+        return;
+    }
+#endif
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1386,7 +1673,7 @@ void VirtioFsDevice::HandleRename(const FuseInHeader* in_hdr, const uint8_t* in_
         auto HasPrefix = [](const std::string& path, const std::string& prefix) -> bool {
             if (path.size() < prefix.size()) return false;
             if (path.compare(0, prefix.size(), prefix) != 0) return false;
-            return path.size() == prefix.size() || path[prefix.size()] == '\\';
+            return path.size() == prefix.size() || path[prefix.size()] == kPathSep;
         };
 
         std::vector<std::string> stale_paths;
@@ -1432,23 +1719,32 @@ void VirtioFsDevice::HandleRename(const FuseInHeader* in_hdr, const uint8_t* in_
 void VirtioFsDevice::HandleFlush(const FuseInHeader*, const uint8_t* in_data) {
     auto* release_in = reinterpret_cast<const FuseReleaseIn*>(in_data);
     FileHandle* fh = GetFileHandle(release_in->fh);
-    if (fh && fh->handle != INVALID_HANDLE_VALUE) {
+    if (fh && fh->handle != FS_INVALID_HANDLE) {
+#ifdef _WIN32
         FlushFileBuffers(fh->handle);
+#else
+        ::fsync(fh->handle);
+#endif
     }
 }
 
 void VirtioFsDevice::HandleFsync(const FuseInHeader*, const uint8_t* in_data) {
     auto* release_in = reinterpret_cast<const FuseReleaseIn*>(in_data);
     FileHandle* fh = GetFileHandle(release_in->fh);
-    if (fh && fh->handle != INVALID_HANDLE_VALUE) {
+    if (fh && fh->handle != FS_INVALID_HANDLE) {
+#ifdef _WIN32
         FlushFileBuffers(fh->handle);
+#else
+        ::fsync(fh->handle);
+#endif
     }
 }
 
 int32_t VirtioFsDevice::FillAttr(const std::string& path, FuseAttr* attr, uint64_t inode, bool share_readonly) {
+#ifdef _WIN32
     WIN32_FILE_ATTRIBUTE_DATA fad;
     if (!GetFileAttributesExW(Utf8ToWide(path).c_str(), GetFileExInfoStandard, &fad)) {
-        return WindowsErrorToFuse(GetLastError());
+        return PlatformErrorToFuse();
     }
 
     memset(attr, 0, sizeof(*attr));
@@ -1480,12 +1776,36 @@ int32_t VirtioFsDevice::FillAttr(const std::string& path, FuseAttr* attr, uint64
         attr->nlink = 1;
     }
 
-    // On Windows, FILE_ATTRIBUTE_READONLY on directories is not a reliable
-    // writability signal; only treat it as read-only for regular files.
     bool host_readonly = !is_dir && ((fad.dwFileAttributes & FILE_ATTRIBUTE_READONLY) != 0);
     if (share_readonly || host_readonly) {
         attr->mode &= ~0222;
     }
+#else
+    struct stat st;
+    if (::stat(path.c_str(), &st) != 0) {
+        return PlatformErrorToFuse();
+    }
+
+    memset(attr, 0, sizeof(*attr));
+    attr->ino = inode;
+    attr->size = static_cast<uint64_t>(st.st_size);
+    attr->blocks = static_cast<uint64_t>(st.st_blocks);
+    attr->nlink = static_cast<uint32_t>(st.st_nlink);
+
+    // macOS uses st_atimespec/st_mtimespec/st_ctimespec
+    attr->atime = static_cast<uint64_t>(st.st_atimespec.tv_sec);
+    attr->atimensec = static_cast<uint32_t>(st.st_atimespec.tv_nsec);
+    attr->mtime = static_cast<uint64_t>(st.st_mtimespec.tv_sec);
+    attr->mtimensec = static_cast<uint32_t>(st.st_mtimespec.tv_nsec);
+    attr->ctime = static_cast<uint64_t>(st.st_ctimespec.tv_sec);
+    attr->ctimensec = static_cast<uint32_t>(st.st_ctimespec.tv_nsec);
+
+    attr->mode = st.st_mode;
+
+    if (share_readonly) {
+        attr->mode &= ~0222;
+    }
+#endif
 
     attr->uid = 0;
     attr->gid = 0;
@@ -1514,7 +1834,9 @@ int32_t VirtioFsDevice::FillShareRootAttr(const ShareInfo& share, FuseAttr* attr
     return FillAttr(share.host_path, attr, share.root_inode, share.readonly);
 }
 
-int32_t VirtioFsDevice::WindowsErrorToFuse(DWORD error) {
+int32_t VirtioFsDevice::PlatformErrorToFuse() {
+#ifdef _WIN32
+    DWORD error = GetLastError();
     switch (error) {
     case ERROR_FILE_NOT_FOUND:
     case ERROR_PATH_NOT_FOUND:
@@ -1537,10 +1859,12 @@ int32_t VirtioFsDevice::WindowsErrorToFuse(DWORD error) {
     default:
         return FUSE_EIO;
     }
+#else
+    return -errno;
+#endif
 }
 
 uint64_t VirtioFsDevice::AllocInode() {
-    // Note: caller should already hold mutex_
     return next_inode_++;
 }
 
@@ -1594,7 +1918,7 @@ void VirtioFsDevice::RemoveInodeByPath(const std::string& path) {
     inodes_.erase(inode);
 }
 
-uint64_t VirtioFsDevice::AllocFileHandle(HANDLE h, bool is_dir, const std::string& path, const std::string& share_tag) {
+uint64_t VirtioFsDevice::AllocFileHandle(FsHandle h, bool is_dir, const std::string& path, const std::string& share_tag) {
     std::lock_guard<std::mutex> lock(mutex_);
     uint64_t fh = next_fh_++;
     file_handles_[fh] = {h, is_dir, path, share_tag};
@@ -1602,7 +1926,6 @@ uint64_t VirtioFsDevice::AllocFileHandle(HANDLE h, bool is_dir, const std::strin
 }
 
 FileHandle* VirtioFsDevice::GetFileHandle(uint64_t fh) {
-    // Note: caller should handle locking if needed
     auto it = file_handles_.find(fh);
     return it != file_handles_.end() ? &it->second : nullptr;
 }
@@ -1611,8 +1934,12 @@ void VirtioFsDevice::CloseFileHandle(uint64_t fh) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = file_handles_.find(fh);
     if (it != file_handles_.end()) {
-        if (it->second.handle != INVALID_HANDLE_VALUE) {
+        if (it->second.handle != FS_INVALID_HANDLE) {
+#ifdef _WIN32
             CloseHandle(it->second.handle);
+#else
+            ::close(it->second.handle);
+#endif
         }
         file_handles_.erase(it);
     }
@@ -1633,7 +1960,6 @@ std::string VirtioFsDevice::NodeIdToShareTag(uint64_t nodeid) {
 bool VirtioFsDevice::IsShareReadonly(const std::string& share_tag) {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    // Empty share_tag means something is wrong, but don't block writes
     if (share_tag.empty()) {
         LOG_WARN("VirtIO FS: IsShareReadonly called with empty share_tag");
         return false;
@@ -1642,7 +1968,7 @@ bool VirtioFsDevice::IsShareReadonly(const std::string& share_tag) {
     auto it = shares_.find(share_tag);
     if (it == shares_.end()) {
         LOG_WARN("VirtIO FS: share '%s' not found in IsShareReadonly", share_tag.c_str());
-        return false;  // Default to writable if share not found
+        return false;
     }
     
     return it->second.readonly;

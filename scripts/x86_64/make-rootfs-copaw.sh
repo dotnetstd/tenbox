@@ -1,6 +1,5 @@
 #!/bin/bash
-# Build a minimal Debian desktop rootfs as qcow2 for TenBox.
-# No Copaw, no Chrome — just XFCE desktop with basic tools.
+# Build a Debian base rootfs as qcow2 for TenBox Phase 2.
 # Requires: debootstrap, qemu-utils. Run as root in WSL2 or Linux.
 #
 # Features:
@@ -8,11 +7,11 @@
 #   - APT cache: reuse downloaded packages across runs
 #
 # Usage:
-#   ./make-rootfs-base.sh [output.qcow2]           # Normal run (resume if interrupted)
-#   ./make-rootfs-base.sh --force [output.qcow2]   # Force rebuild from scratch
-#   ./make-rootfs-base.sh --from-step N            # Resume from step N
-#   ./make-rootfs-base.sh --list-steps             # Show all steps
-#   ./make-rootfs-base.sh --status                 # Show current progress
+#   ./make-rootfs.sh [output.qcow2]           # Normal run (resume if interrupted)
+#   ./make-rootfs.sh --force [output.qcow2]   # Force rebuild from scratch
+#   ./make-rootfs.sh --from-step N            # Resume from step N
+#   ./make-rootfs.sh --list-steps             # Show all steps
+#   ./make-rootfs.sh --status                 # Show current progress
 
 set -e
 
@@ -35,20 +34,21 @@ kmod,pciutils,usbutils,\
 coreutils,findutils,grep,gawk,sed,tar,gzip,bzip2,xz-utils"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/../build"
+BUILD_DIR="$SCRIPT_DIR/../../build"
 mkdir -p "$BUILD_DIR"
 
 # Cache directories
 CACHE_DIR="$BUILD_DIR/.rootfs-cache"
-CHECKPOINT_DIR="$CACHE_DIR/checkpoints-base"
+CHECKPOINT_DIR="$CACHE_DIR/checkpoints-copaw"
 APT_CACHE_DIR="$CACHE_DIR/apt-archives"
-mkdir -p "$CHECKPOINT_DIR" "$APT_CACHE_DIR"
+SCRIPTS_CACHE_DIR="$CACHE_DIR/scripts"
+mkdir -p "$CHECKPOINT_DIR" "$APT_CACHE_DIR" "$SCRIPTS_CACHE_DIR"
 
 # Cache files
 CACHE_TAR="$CACHE_DIR/debootstrap-${SUITE}-base.tar"
 
 # Work dir must be on WSL Linux FS (/tmp), not NTFS (DrvFS /mnt/*) - loop devices need mknod
-WORK_DIR="/tmp/tenbox-rootfs-base"
+WORK_DIR="${TENBOX_WORK_DIR:-/tmp/tenbox-rootfs-copaw}"
 
 # Parse arguments
 FORCE_REBUILD=false
@@ -59,9 +59,9 @@ OUTPUT_ARG=""
 
 show_help() {
     cat << 'HELP'
-Usage: ./make-rootfs-base.sh [OPTIONS] [output.qcow2]
+Usage: ./make-rootfs.sh [OPTIONS] [output.qcow2]
 
-Build a minimal Debian desktop rootfs image for TenBox (no Copaw, no Chrome).
+Build a Debian rootfs image for TenBox.
 
 Options:
   --help          Show this help message
@@ -71,9 +71,9 @@ Options:
   --from-step N   Resume from step N (use --list-steps to see numbers)
 
 Examples:
-  ./make-rootfs-base.sh                    # Normal build (resume if interrupted)
-  ./make-rootfs-base.sh --status           # Check progress
-  ./make-rootfs-base.sh --force            # Rebuild from scratch
+  ./make-rootfs.sh                    # Normal build (resume if interrupted)
+  ./make-rootfs.sh --status           # Check progress
+  ./make-rootfs.sh --force            # Rebuild from scratch
 HELP
     exit 0
 }
@@ -106,7 +106,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-OUTPUT="$(realpath -m "${OUTPUT_ARG:-$BUILD_DIR/share/rootfs-base.qcow2}")"
+if [ -n "$OUTPUT_ARG" ]; then
+    OUTPUT="$(realpath -m "$OUTPUT_ARG")"
+else
+    OUTPUT=""  # will be determined after copaw version is known
+    OUTPUT_DIR="$(realpath -m "$BUILD_DIR/share")"
+fi
+
+COPAW_VERSION=""
 
 # Step definitions
 STEPS=(
@@ -123,6 +130,8 @@ STEPS=(
     "install_audio"
     "install_ibus"
     "install_usertools"
+    "install_copaw"
+    "config_copaw"
     "config_locale"
     "config_services"
     "config_virtio_gpu"
@@ -150,6 +159,8 @@ STEP_DESCRIPTIONS=(
     "Install audio (PulseAudio + ALSA)"
     "Install IBus Chinese input method"
     "Install user tools (Chromium, etc.)"
+    "Install Copaw"
+    "Configure Copaw autostart"
     "Configure locale"
     "Configure systemd services"
     "Configure virtio-gpu resize"
@@ -330,8 +341,8 @@ PRC
     fi
     
     # Copy rootfs helper scripts and services
-    sudo cp -r "$SCRIPT_DIR/rootfs-scripts" "$MOUNT_DIR/tmp/"
-    sudo cp -r "$SCRIPT_DIR/rootfs-services" "$MOUNT_DIR/tmp/"
+    sudo cp -r "$SCRIPT_DIR/../rootfs-scripts" "$MOUNT_DIR/tmp/"
+    sudo cp -r "$SCRIPT_DIR/../rootfs-services" "$MOUNT_DIR/tmp/"
 }
 
 do_config_basic() {
@@ -515,6 +526,54 @@ IBUS
 EOF
 }
 
+do_install_copaw() {
+    sudo chroot "$MOUNT_DIR" /bin/bash -e << EOF
+if [ -d /home/$USER_NAME/.copaw ]; then
+    echo "  Copaw already installed"
+    exit 0
+fi
+
+echo "Installing Copaw..."
+su - $USER_NAME -c 'curl -fsSL https://copaw.agentscope.io/install.sh | bash'
+
+echo "Initializing Copaw..."
+su - $USER_NAME -c '~/.copaw/bin/copaw init --defaults --accept-security'
+
+EOF
+
+    # Extract version for output filename
+    COPAW_VERSION=$(sudo chroot "$MOUNT_DIR" su - "$USER_NAME" -c \
+        '~/.copaw/venv/bin/python -c "from copaw.__version__ import __version__; print(__version__)"' 2>/dev/null || true)
+    if [ -n "$COPAW_VERSION" ]; then
+        echo "  Copaw version: $COPAW_VERSION"
+    else
+        echo "  WARNING: Could not detect Copaw version"
+    fi
+}
+
+do_config_copaw() {
+    sudo chroot "$MOUNT_DIR" /bin/bash -e << EOF
+if [ -f /home/$USER_NAME/.config/autostart/copaw.desktop ]; then
+    echo "  Copaw already configured"
+    exit 0
+fi
+
+echo "Setting up Copaw autostart..."
+mkdir -p /home/$USER_NAME/.config/autostart
+cat > /home/$USER_NAME/.config/autostart/copaw.desktop << 'DESKTOP'
+[Desktop Entry]
+Type=Application
+Exec=xfce4-terminal -e "bash -ic 'echo Starting CoPaw...; copaw app --host 0.0.0.0; exec bash'"
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+Name=Copaw AutoRun
+Comment=Start copaw app in terminal on login
+DESKTOP
+chown -R $USER_NAME:$USER_NAME /home/$USER_NAME/.config
+EOF
+}
+
 do_config_locale() {
     sudo chroot "$MOUNT_DIR" /bin/bash -e << 'EOF'
 # Check if locale already configured
@@ -658,10 +717,11 @@ check "init"              test -x /sbin/init
 check "systemd"           dpkg -s systemd
 check "xfce4"             dpkg -s xfce4
 check "lightdm"           dpkg -s lightdm
-check "chromium"          dpkg -s chromium
 check "spice-vdagent"     dpkg -s spice-vdagent
 check "qemu-guest-agent"  dpkg -s qemu-guest-agent
 check "pulseaudio"        dpkg -s pulseaudio
+check "copaw"             test -d /home/terrence/.copaw
+check "chromium"          dpkg -s chromium
 check "curl"              command -v curl
 check "wget"              command -v wget
 check "vim"               command -v vim
@@ -673,6 +733,13 @@ EOF
 }
 
 do_cleanup_chroot() {
+    # Detect version from chroot if not already known (e.g. on resume)
+    if [ -z "$COPAW_VERSION" ]; then
+        COPAW_VERSION=$(sudo chroot "$MOUNT_DIR" su - "$USER_NAME" -c \
+            '~/.copaw/venv/bin/python -c "from copaw.__version__ import __version__; print(__version__)"' 2>/dev/null || true)
+        [ -n "$COPAW_VERSION" ] && echo "  Detected Copaw version: $COPAW_VERSION"
+    fi
+
     # Clean apt cache inside chroot (but keep host cache)
     sudo chroot "$MOUNT_DIR" /bin/bash -e << 'EOF'
 apt-get clean
@@ -699,6 +766,16 @@ do_unmount_image() {
 }
 
 do_convert_qcow2() {
+    # Resolve final output path with version if not explicitly specified
+    if [ -z "$OUTPUT" ]; then
+        if [ -n "$COPAW_VERSION" ]; then
+            OUTPUT="$OUTPUT_DIR/rootfs-copaw-${COPAW_VERSION}.qcow2"
+        else
+            OUTPUT="$OUTPUT_DIR/rootfs-copaw.qcow2"
+        fi
+    fi
+    mkdir -p "$(dirname "$OUTPUT")"
+
     echo "Converting to qcow2..."
     # Prefer Windows qemu-img.exe (supports zstd), fallback to WSL version
     WIN_QEMU="/mnt/c/Program Files/qemu/qemu-img.exe"
@@ -709,7 +786,7 @@ do_convert_qcow2() {
         "$WIN_QEMU" convert -f raw -O qcow2 -o cluster_size=65536,compression_type=zstd -c "$WIN_RAW" "$WIN_OUTPUT"
     else
         echo "  Using WSL qemu-img with zlib compression..."
-        qemu-img convert -f raw -O qcow2 -o cluster_size=65536 -c "$WORK_DIR/rootfs.raw" "$OUTPUT"
+        qemu-img convert -f raw -O qcow2 -o cluster_size=65536,compression_type=zstd -c "$WORK_DIR/rootfs.raw" "$OUTPUT"
     fi
 }
 
@@ -727,6 +804,8 @@ run_step "install_devtools" "Installing dev tools"    do_install_devtools
 run_step "install_audio"  "Installing audio"          do_install_audio
 run_step "install_ibus"   "Installing IBus"           do_install_ibus
 run_step "install_usertools" "Installing user tools"  do_install_usertools
+run_step "install_copaw"  "Installing Copaw"          do_install_copaw
+run_step "config_copaw"   "Configuring Copaw"         do_config_copaw
 run_step "config_locale"  "Configuring locale"        do_config_locale
 run_step "config_services" "Configuring services"     do_config_services
 run_step "config_virtio_gpu" "Configuring virtio-gpu" do_config_virtio_gpu

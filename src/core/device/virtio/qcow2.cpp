@@ -6,7 +6,8 @@
 #ifdef _WIN32
 #include <intrin.h>
 #else
-#include <byteswap.h>
+#define _fseeki64 fseeko
+#define _ftelli64 ftello
 #endif
 
 // zlib for compressed cluster support

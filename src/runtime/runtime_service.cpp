@@ -3,8 +3,6 @@
 #include "core/vmm/types.h"
 #include "core/vmm/vm.h"
 
-#include <windows.h>
-
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -12,14 +10,6 @@
 #include <cstdio>
 #include <cstring>
 #include <unordered_set>
-
-namespace {
-
-HANDLE AsHandle(void* handle) {
-    return reinterpret_cast<HANDLE>(handle);
-}
-
-}  // namespace
 
 void ManagedConsolePort::Write(const uint8_t* data, size_t size) {
     if (!data || size == 0) return;
@@ -381,7 +371,6 @@ bool RuntimeControlService::Start() {
     running_ = true;
 
     send_thread_ = std::thread([this]() {
-        HANDLE h = AsHandle(pipe_handle_);
         constexpr auto kFlushInterval = std::chrono::milliseconds(20);
 
         while (running_) {
@@ -389,7 +378,6 @@ bool RuntimeControlService::Start() {
             {
                 std::unique_lock<std::mutex> lock(send_queue_mutex_);
 
-                // Determine wait duration based on whether console has pending data.
                 bool has_pending = console_port_->HasPending();
                 if (has_pending) {
                     send_cv_.wait_for(lock, kFlushInterval);
@@ -406,7 +394,6 @@ bool RuntimeControlService::Start() {
                     break;
                 }
 
-                // Flush any pending console output from the port.
                 std::string console_data = console_port_->FlushPending();
                 if (!console_data.empty()) {
                     ipc::Message event;
@@ -421,20 +408,17 @@ bool RuntimeControlService::Start() {
                     batch += ipc::Encode(event);
                 }
 
-                // Send all queued high-priority messages (control responses, etc.).
                 while (!console_queue_.empty()) {
                     batch += std::move(console_queue_.front());
                     console_queue_.pop_front();
                 }
 
-                // Send audio PCM chunks (latency-sensitive).
                 size_t audio_to_send = audio_queue_.size();
                 while (audio_to_send-- > 0 && !audio_queue_.empty()) {
                     batch += std::move(audio_queue_.front());
                     audio_queue_.pop_front();
                 }
 
-                // Send display frames (bounded to avoid blocking too long).
                 size_t frames_to_send = frame_queue_.size();
                 while (frames_to_send-- > 0 && !frame_queue_.empty()) {
                     batch += std::move(frame_queue_.front());
@@ -447,23 +431,11 @@ bool RuntimeControlService::Start() {
             }
 
             std::lock_guard<std::mutex> send_lock(send_mutex_);
-            h = AsHandle(pipe_handle_);
-            if (!h || h == INVALID_HANDLE_VALUE) {
+            if (!transport_ || !transport_->IsConnected()) {
                 break;
             }
-
-            const char* data = batch.data();
-            size_t remaining = batch.size();
-            while (remaining > 0) {
-                DWORD written = 0;
-                if (!WriteFile(h, data, static_cast<DWORD>(remaining), &written, nullptr)) {
-                    break;
-                }
-                if (written == 0) {
-                    break;
-                }
-                data += written;
-                remaining -= written;
+            if (!transport_->Send(batch)) {
+                break;
             }
         }
     });
@@ -476,19 +448,14 @@ void RuntimeControlService::Stop() {
     running_ = false;
     send_cv_.notify_all();
 
-    // Let the send thread drain remaining queued messages before closing
-    // the pipe, so final state updates (e.g. "crashed") reach the manager.
     if (send_thread_.joinable()) {
         send_thread_.join();
     }
 
-    HANDLE h = AsHandle(pipe_handle_);
-    if (h && h != INVALID_HANDLE_VALUE) {
-        FlushFileBuffers(h);
-        CancelIoEx(h, nullptr);
-        CloseHandle(h);
-        pipe_handle_ = nullptr;
+    if (transport_) {
+        transport_->Close();
     }
+
     if (recv_thread_.joinable()) {
         recv_thread_.join();
     }
@@ -526,28 +493,13 @@ void RuntimeControlService::PublishState(const std::string& state, int exit_code
 
 bool RuntimeControlService::EnsureClientConnected() {
     if (pipe_name_.empty()) return false;
+    if (transport_ && transport_->IsConnected()) return true;
 
-    HANDLE h = AsHandle(pipe_handle_);
-    if (h && h != INVALID_HANDLE_VALUE) return true;
-
-    std::string full_name = R"(\\.\pipe\)" + pipe_name_;
-    
-    // Connect to Manager's pipe (already created before we started).
-    h = CreateFileA(
-        full_name.c_str(),
-        GENERIC_READ | GENERIC_WRITE,
-        0,
-        nullptr,
-        OPEN_EXISTING,
-        0,
-        nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        LOG_ERROR("Failed to connect to pipe %s: %lu", full_name.c_str(), GetLastError());
+    transport_ = ipc::CreateClientTransport();
+    if (!transport_->Connect(pipe_name_)) {
+        transport_.reset();
         return false;
     }
-    DWORD mode = PIPE_READMODE_BYTE;
-    SetNamedPipeHandleState(h, &mode, nullptr, nullptr);
-    pipe_handle_ = h;
     return true;
 }
 
@@ -895,41 +847,21 @@ void RuntimeControlService::RunLoop() {
         return;
     }
 
-    HANDLE h = AsHandle(pipe_handle_);
     std::array<char, 65536> buf{};
     std::string pending;
     size_t payload_needed = 0;
     ipc::Message pending_msg;
 
     while (running_) {
-        DWORD available = 0;
-        if (!PeekNamedPipe(h, nullptr, 0, nullptr, &available, nullptr)) {
-            DWORD err = GetLastError();
-            if (err == ERROR_BROKEN_PIPE) {
-                break;
-            }
-            Sleep(1);
-            continue;
-        }
-        if (available == 0) {
-            Sleep(1);
-            continue;
-        }
+        if (!transport_ || !transport_->IsConnected()) break;
 
-        DWORD to_read = (std::min)(available, static_cast<DWORD>(buf.size()));
-        DWORD read = 0;
-        if (!ReadFile(h, buf.data(), to_read, &read, nullptr)) {
-            DWORD err = GetLastError();
-            if (err == ERROR_BROKEN_PIPE || err == ERROR_OPERATION_ABORTED) {
-                break;
-            }
-            continue;
-        }
-        if (read == 0) {
-            continue;
-        }
+        int poll_result = transport_->PollRead(10);
+        if (poll_result < 0) break;
+        if (poll_result == 0) continue;
 
-        pending.append(buf.data(), read);
+        ssize_t n = transport_->Recv(buf.data(), buf.size());
+        if (n <= 0) break;
+        pending.append(buf.data(), static_cast<size_t>(n));
 
         while (!pending.empty()) {
             if (payload_needed > 0) {

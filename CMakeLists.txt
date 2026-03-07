@@ -73,6 +73,8 @@ set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_SAVED})
 
 if(MSVC)
     target_compile_options(lwipcore PRIVATE /W0)
+else()
+    target_compile_options(lwipcore PRIVATE -w)
 endif()
 
 configure_file(src/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/version.h)
@@ -89,5 +91,11 @@ add_subdirectory(src/core)
 add_subdirectory(src/platform)
 add_subdirectory(src/ipc)
 add_subdirectory(src/runtime)
-add_subdirectory(src/manager)
+
+if(WIN32)
+    add_subdirectory(src/manager)
+endif()
+
+# macOS manager is built separately via Xcode/SwiftPM (src/manager-macos)
+
 add_subdirectory(tests)

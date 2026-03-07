@@ -5,8 +5,15 @@
 #include <unordered_map>
 #include <mutex>
 
+#ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+using FsHandle = HANDLE;
+#define FS_INVALID_HANDLE INVALID_HANDLE_VALUE
+#else
+using FsHandle = int;
+#define FS_INVALID_HANDLE (-1)
+#endif
 
 // VirtIO FS device ID
 constexpr uint32_t VIRTIO_ID_FS = 26;
@@ -343,8 +350,8 @@ struct InodeInfo {
 
 // Open file handle
 struct FileHandle {
-    HANDLE handle;
-    bool is_dir;
+    FsHandle handle = FS_INVALID_HANDLE;
+    bool is_dir = false;
     std::string path;
     std::string share_tag;
 };
@@ -423,13 +430,13 @@ private:
     int32_t FillAttr(const std::string& path, FuseAttr* attr, uint64_t inode, bool share_readonly = false);
     int32_t FillVirtualRootAttr(FuseAttr* attr);
     int32_t FillShareRootAttr(const ShareInfo& share, FuseAttr* attr);
-    int32_t WindowsErrorToFuse(DWORD error);
+    int32_t PlatformErrorToFuse();
     uint64_t AllocInode();
     InodeInfo* GetInode(uint64_t inode);
     uint64_t GetOrCreateInode(const std::string& path, bool is_dir, const std::string& share_tag);
     void RemoveInode(uint64_t inode);
     void RemoveInodeByPath(const std::string& path);
-    uint64_t AllocFileHandle(HANDLE h, bool is_dir, const std::string& path, const std::string& share_tag);
+    uint64_t AllocFileHandle(FsHandle h, bool is_dir, const std::string& path, const std::string& share_tag);
     FileHandle* GetFileHandle(uint64_t fh);
     void CloseFileHandle(uint64_t fh);
     std::string NodeIdToPath(uint64_t nodeid);

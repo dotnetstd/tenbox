@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/ports.h"
+#include "ipc/ipc_transport.h"
 #include "ipc/protocol_v1.h"
 
 #include <atomic>
@@ -127,9 +128,9 @@ private:
     std::thread send_thread_;
     std::thread recv_thread_;
 
-    // Protects pipe_handle_ and low-level WriteFile operations.
+    // Protects transport writes.
     std::mutex send_mutex_;
-    void* pipe_handle_ = nullptr;
+    std::unique_ptr<ipc::IpcTransport> transport_;
     Vm* vm_ = nullptr;
     std::atomic<uint64_t> next_event_id_{1};
 

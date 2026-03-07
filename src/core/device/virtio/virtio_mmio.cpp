@@ -145,9 +145,13 @@ void VirtioMmioDevice::MmioWrite(uint64_t offset, uint8_t size,
             ops_->OnQueueNotify(val, queues_[val]);
         }
         break;
-    case kInterruptACK:
-        interrupt_status_.fetch_and(~val, std::memory_order_acq_rel);
+    case kInterruptACK: {
+        uint32_t prev = interrupt_status_.fetch_and(~val, std::memory_order_acq_rel);
+        if ((prev & ~val) == 0 && irq_level_callback_) {
+            irq_level_callback_(false);
+        }
         break;
+    }
     case kStatus:
         if (val == 0) {
             DoReset();
@@ -202,11 +206,17 @@ void VirtioMmioDevice::MmioWrite(uint64_t offset, uint8_t size,
 
 void VirtioMmioDevice::NotifyUsedBuffer() {
     interrupt_status_.fetch_or(1, std::memory_order_release);  // VIRTIO_MMIO_INT_VRING
-    if (irq_callback_) irq_callback_();
+    if (irq_level_callback_)
+        irq_level_callback_(true);
+    else if (irq_callback_)
+        irq_callback_();
 }
 
 void VirtioMmioDevice::NotifyConfigChange() {
     config_generation_++;
     interrupt_status_.fetch_or(2, std::memory_order_release);  // VIRTIO_MMIO_INT_CONFIG
-    if (irq_callback_) irq_callback_();
+    if (irq_level_callback_)
+        irq_level_callback_(true);
+    else if (irq_callback_)
+        irq_callback_();
 }

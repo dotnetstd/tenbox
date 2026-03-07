@@ -10,7 +10,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OUTDIR="$(mkdir -p "${1:-$SCRIPT_DIR/../build/share}" && cd "${1:-$SCRIPT_DIR/../build/share}" && pwd)"
+OUTDIR="$(mkdir -p "${1:-$SCRIPT_DIR/../../build/share}" && cd "${1:-$SCRIPT_DIR/../../build/share}" && pwd)"
 SUITE="${2:-bookworm}"
 WORKDIR=$(mktemp -d)
 trap "rm -rf $WORKDIR" EXIT

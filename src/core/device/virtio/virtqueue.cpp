@@ -52,6 +52,11 @@ bool VirtQueue::HasAvailable() const {
     if (!ready_) return false;
     auto* avail = Avail();
     if (!avail) return false;
+    // On ARM64 we need a load-acquire barrier to see guest's latest writes
+    // to the avail ring, since the guest CPU is a separate observer.
+#if defined(__aarch64__)
+    __asm__ volatile("dmb ish" ::: "memory");
+#endif
     return last_avail_idx_ != avail->idx;
 }
 
@@ -114,7 +119,15 @@ void VirtQueue::PushUsed(uint16_t head_idx, uint32_t total_len) {
     ring[used_idx].len = total_len;
 
     // Memory barrier: ensure the ring entry is visible before updating idx.
+    // ARM64 requires a hardware barrier (dmb); a compiler-only fence is
+    // insufficient due to the weak memory model.
+#ifdef _MSC_VER
     _ReadWriteBarrier();
+#elif defined(__aarch64__)
+    __asm__ volatile("dmb ish" ::: "memory");
+#else
+    __asm__ volatile("" ::: "memory");
+#endif
 
     used->idx++;
 }

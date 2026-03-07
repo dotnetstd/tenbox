@@ -1,0 +1,367 @@
+#include "core/arch/aarch64/aarch64_machine.h"
+#include "core/arch/aarch64/fdt_builder.h"
+#include "core/vmm/vm.h"
+#include <cstring>
+#include <cstdio>
+
+#ifdef __APPLE__
+#include "platform/macos/hypervisor/hvf_vcpu.h"
+#include "platform/macos/hypervisor/hvf_vm.h"
+#endif
+
+bool Aarch64Machine::SetupPlatformDevices(
+    AddressSpace& addr_space,
+    GuestMemMap& /*mem*/,
+    HypervisorVm* hv_vm,
+    std::shared_ptr<ConsolePort> console_port,
+    std::function<void()> shutdown_cb,
+    std::function<void()> reboot_cb) {
+
+    hv_vm_ = hv_vm;
+    shutdown_cb_ = std::move(shutdown_cb);
+    (void)reboot_cb;  // ARM64 PSCI reboot is handled differently
+
+    uart_.SetIrqCallback([this]() {
+        InjectIrq(hv_vm_, kUartIrq);
+    });
+    uart_.SetIrqLevelCallback([this](bool asserted) {
+        SetIrqLevel(hv_vm_, kUartIrq, asserted);
+    });
+    uart_.SetTxCallback([console_port](uint8_t byte) {
+        if (!console_port) return;
+        console_port->Write(&byte, 1);
+    });
+    addr_space.AddMmioDevice(kUartBase, Pl011::kMmioSize, &uart_);
+
+    return true;
+}
+
+bool Aarch64Machine::LoadKernel(
+    const VmConfig& config,
+    GuestMemMap& mem,
+    const std::vector<VirtioDeviceSlot>& virtio_slots) {
+
+    using namespace aarch64;
+
+    // Load the ARM64 Image
+    BootConfig boot_cfg;
+    boot_cfg.kernel_path = config.kernel_path;
+    boot_cfg.initrd_path = config.initrd_path;
+    boot_cfg.cmdline = config.cmdline;
+    boot_cfg.mem = mem;
+    boot_cfg.cpu_count = config.cpu_count;
+
+    kernel_entry_ = LoadLinuxImage(boot_cfg);
+    if (kernel_entry_ == 0) return false;
+
+    // Determine initrd location (after kernel, page-aligned)
+    GPA initrd_start = 0;
+    GPA initrd_end = 0;
+    uint64_t initrd_size = 0;
+
+    if (!config.initrd_path.empty()) {
+        FILE* fp = fopen(config.initrd_path.c_str(), "rb");
+        if (!fp) {
+            LOG_ERROR("aarch64: cannot open initrd: %s", config.initrd_path.c_str());
+            return false;
+        }
+        fseek(fp, 0, SEEK_END);
+        long sz = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+
+        if (sz <= 0) {
+            LOG_ERROR("aarch64: initrd is empty");
+            fclose(fp);
+            return false;
+        }
+        initrd_size = static_cast<uint64_t>(sz);
+
+        // Place initrd after kernel's reserved region, aligned to page boundary.
+        // Must use image_size (not file size) — the kernel expands BSS/init in-place.
+        uint64_t text_offset = kernel_entry_ - Layout::kRamBase;
+        uint64_t kernel_reserved_end = text_offset;
+        {
+            FILE* kfp = fopen(config.kernel_path.c_str(), "rb");
+            if (kfp) {
+                LinuxImageHeader hdr{};
+                if (fread(&hdr, sizeof(hdr), 1, kfp) == 1 && hdr.image_size > 0) {
+                    kernel_reserved_end = text_offset + hdr.image_size;
+                } else {
+                    fseek(kfp, 0, SEEK_END);
+                    kernel_reserved_end = text_offset + static_cast<uint64_t>(ftell(kfp));
+                }
+                fclose(kfp);
+            }
+        }
+
+        uint64_t initrd_offset = AlignUp(kernel_reserved_end, kPageSize);
+        if (initrd_offset + initrd_size > mem.alloc_size) {
+            LOG_ERROR("aarch64: initrd doesn't fit in guest RAM");
+            fclose(fp);
+            return false;
+        }
+
+        uint8_t* dest = mem.base + initrd_offset;
+        size_t read = fread(dest, 1, static_cast<size_t>(initrd_size), fp);
+        fclose(fp);
+
+        if (read != static_cast<size_t>(initrd_size)) {
+            LOG_ERROR("aarch64: short initrd read (%zu / %llu)", read,
+                      (unsigned long long)initrd_size);
+            return false;
+        }
+
+        initrd_start = Layout::kRamBase + initrd_offset;
+        initrd_end = initrd_start + initrd_size;
+
+        LOG_INFO("aarch64: initrd loaded at GPA 0x%llx (%llu bytes)",
+                 (unsigned long long)initrd_start,
+                 (unsigned long long)initrd_size);
+    }
+
+    // Build FDT
+    FdtBuilder fdt;
+
+    // Pre-allocate GIC phandle so interrupt-parent can be set early
+    uint32_t gic_phandle = fdt.AllocPhandle();
+
+    fdt.BeginNode("");  // root node
+
+    fdt.AddPropertyString("compatible", "linux,dummy-virt");
+    fdt.AddPropertyU32("#address-cells", 2);
+    fdt.AddPropertyU32("#size-cells", 2);
+    fdt.AddPropertyU32("interrupt-parent", gic_phandle);
+
+    // /chosen
+    fdt.BeginNode("chosen");
+    if (!config.cmdline.empty()) {
+        fdt.AddPropertyString("bootargs", config.cmdline);
+    }
+    if (initrd_start) {
+        fdt.AddPropertyU64("linux,initrd-start", initrd_start);
+        fdt.AddPropertyU64("linux,initrd-end", initrd_end);
+    }
+    char stdout_path[64];
+    snprintf(stdout_path, sizeof(stdout_path), "/pl011@%llx",
+             (unsigned long long)kUartBase);
+    fdt.AddPropertyString("stdout-path", stdout_path);
+    fdt.EndNode();
+
+    // /memory
+    char mem_name[32];
+    snprintf(mem_name, sizeof(mem_name), "memory@%llx",
+             (unsigned long long)Layout::kRamBase);
+    fdt.BeginNode(mem_name);
+    fdt.AddPropertyString("device_type", "memory");
+    fdt.AddPropertyCells("reg", {
+        static_cast<uint32_t>(Layout::kRamBase >> 32),
+        static_cast<uint32_t>(Layout::kRamBase & 0xFFFFFFFF),
+        static_cast<uint32_t>(mem.alloc_size >> 32),
+        static_cast<uint32_t>(mem.alloc_size & 0xFFFFFFFF)
+    });
+    fdt.EndNode();
+
+    // /cpus
+    fdt.BeginNode("cpus");
+    fdt.AddPropertyU32("#address-cells", 1);
+    fdt.AddPropertyU32("#size-cells", 0);
+    for (uint32_t i = 0; i < config.cpu_count; i++) {
+        char cpu_name[32];
+        snprintf(cpu_name, sizeof(cpu_name), "cpu@%u", i);
+        fdt.BeginNode(cpu_name);
+        fdt.AddPropertyString("device_type", "cpu");
+        fdt.AddPropertyString("compatible", "arm,arm-v8");
+        fdt.AddPropertyU32("reg", i);
+        if (config.cpu_count > 1) {
+            fdt.AddPropertyString("enable-method", "psci");
+        }
+        fdt.EndNode();
+    }
+    fdt.EndNode();
+
+    // PSCI node (for multi-core)
+    if (config.cpu_count > 1) {
+        fdt.BeginNode("psci");
+        fdt.AddPropertyString("compatible", "arm,psci-1.0");
+        fdt.AddPropertyString("method", "hvc");
+        fdt.EndNode();
+    }
+
+    // /timer (ARM generic timer)
+    fdt.BeginNode("timer");
+    fdt.AddPropertyString("compatible", "arm,armv8-timer");
+    // PPI interrupts: secure phys, non-secure phys, virt, hyp
+    // Type 1 = PPI, IRQ_TYPE_LEVEL_HI = 4 (active-high level-sensitive)
+    fdt.AddPropertyCells("interrupts", {
+        1, 13, 4,   // secure physical timer   (INTID 29)
+        1, 14, 4,   // non-secure physical timer (INTID 30)
+        1, 11, 4,   // virtual timer            (INTID 27)
+        1, 10, 4,   // hypervisor timer         (INTID 26)
+    });
+    fdt.AddPropertyEmpty("always-on");
+    fdt.EndNode();
+
+    // /intc (GICv3)
+    // Use actual redistributor addresses from the hypervisor
+    GPA actual_redist_base = kGicRedistBase;
+    uint32_t redist_total_size = static_cast<uint32_t>(config.cpu_count * 0x20000);
+#ifdef __APPLE__
+    if (hv_vm_) {
+        auto* hvf = dynamic_cast<hvf::HvfVm*>(hv_vm_);
+        if (hvf) {
+            actual_redist_base = hvf->GetRedistBase();
+            redist_total_size = static_cast<uint32_t>(hvf->GetRedistSizePerCpu()) * config.cpu_count;
+        }
+    }
+#endif
+
+    char gic_name[64];
+    snprintf(gic_name, sizeof(gic_name), "intc@%llx",
+             (unsigned long long)kGicDistBase);
+    fdt.BeginNode(gic_name);
+    fdt.AddPropertyString("compatible", "arm,gic-v3");
+    fdt.AddPropertyU32("#interrupt-cells", 3);
+    fdt.AddPropertyEmpty("interrupt-controller");
+    fdt.AddPropertyU32("phandle", gic_phandle);
+    fdt.AddPropertyCells("reg", {
+        static_cast<uint32_t>(kGicDistBase >> 32),
+        static_cast<uint32_t>(kGicDistBase & 0xFFFFFFFF),
+        0, 0x10000,    // Distributor: 64 KiB
+        static_cast<uint32_t>(actual_redist_base >> 32),
+        static_cast<uint32_t>(actual_redist_base & 0xFFFFFFFF),
+        0, redist_total_size,
+    });
+    fdt.EndNode();
+
+    // Fixed clock for AMBA peripherals (PL011 requires clocks property)
+    uint32_t apb_pclk_phandle = fdt.AllocPhandle();
+    fdt.BeginNode("apb-pclk");
+    fdt.AddPropertyString("compatible", "fixed-clock");
+    fdt.AddPropertyU32("#clock-cells", 0);
+    fdt.AddPropertyU32("clock-frequency", 24000000);
+    fdt.AddPropertyString("clock-output-names", "clk24mhz");
+    fdt.AddPropertyU32("phandle", apb_pclk_phandle);
+    fdt.EndNode();
+
+    // /pl011 UART (AMBA PL011 — needs arm,primecell compat and clocks)
+    char uart_name[64];
+    snprintf(uart_name, sizeof(uart_name), "pl011@%llx",
+             (unsigned long long)kUartBase);
+    fdt.BeginNode(uart_name);
+    {
+        const char* compat[] = {"arm,pl011", "arm,primecell"};
+        std::string compat_str;
+        compat_str.append(compat[0], strlen(compat[0]) + 1);
+        compat_str.append(compat[1], strlen(compat[1]) + 1);
+        fdt.AddPropertyBytes("compatible",
+            reinterpret_cast<const uint8_t*>(compat_str.data()),
+            compat_str.size());
+    }
+    fdt.AddPropertyCells("reg", {
+        static_cast<uint32_t>(kUartBase >> 32),
+        static_cast<uint32_t>(kUartBase & 0xFFFFFFFF),
+        0, static_cast<uint32_t>(Pl011::kMmioSize)
+    });
+    fdt.AddPropertyCells("interrupts", {0, kUartIrq, 4});
+    fdt.AddPropertyCells("clocks", {apb_pclk_phandle, apb_pclk_phandle});
+    {
+        const char cn[] = "uartclk\0apb_pclk";
+        fdt.AddPropertyBytes("clock-names",
+            reinterpret_cast<const uint8_t*>(cn), sizeof(cn));
+    }
+    fdt.EndNode();
+
+    // VirtIO MMIO devices
+    for (size_t i = 0; i < virtio_slots.size(); i++) {
+        const auto& slot = virtio_slots[i];
+        char name[64];
+        snprintf(name, sizeof(name), "virtio_mmio@%llx",
+                 (unsigned long long)slot.mmio_base);
+        fdt.BeginNode(name);
+        fdt.AddPropertyString("compatible", "virtio,mmio");
+        fdt.AddPropertyCells("reg", {
+            static_cast<uint32_t>(slot.mmio_base >> 32),
+            static_cast<uint32_t>(slot.mmio_base & 0xFFFFFFFF),
+            0, 0x200
+        });
+        // SPI interrupt (type=0), irq number, level-triggered active-high (4)
+        fdt.AddPropertyCells("interrupts", {0, static_cast<uint32_t>(slot.irq), 4});
+        fdt.AddPropertyEmpty("dma-coherent");
+        fdt.EndNode();
+    }
+
+    fdt.EndNode();  // root node
+
+    auto dtb = fdt.Finish();
+
+    // Place FDT at the start of guest RAM
+    fdt_gpa_ = Layout::kFdtBase;
+    if (dtb.size() > Layout::kFdtMaxSize) {
+        LOG_ERROR("aarch64: FDT too large (%zu bytes, max %llu)",
+                  dtb.size(), (unsigned long long)Layout::kFdtMaxSize);
+        return false;
+    }
+
+    memcpy(mem.base, dtb.data(), dtb.size());
+    LOG_INFO("aarch64: FDT placed at GPA 0x%llx (%zu bytes)",
+             (unsigned long long)fdt_gpa_, dtb.size());
+
+    return true;
+}
+
+bool Aarch64Machine::SetupBootVCpu(HypervisorVCpu* vcpu, uint8_t* /*ram*/) {
+#ifdef __APPLE__
+    // Use the HVF-specific method to set ARM64 boot registers.
+    // We include the HVF header to access the concrete type.
+    auto* hvf_vcpu = dynamic_cast<hvf::HvfVCpu*>(vcpu);
+    if (!hvf_vcpu) {
+        LOG_ERROR("aarch64: SetupBootVCpu requires HvfVCpu");
+        return false;
+    }
+    return hvf_vcpu->SetupAarch64Boot(kernel_entry_, fdt_gpa_);
+#else
+    (void)vcpu;
+    LOG_ERROR("aarch64: SetupBootVCpu called on non-Apple platform");
+    return false;
+#endif
+}
+
+void Aarch64Machine::InjectIrq(HypervisorVm* hv_vm, uint8_t irq) {
+    SetIrqLevel(hv_vm, irq, true);
+}
+
+void Aarch64Machine::SetIrqLevel(HypervisorVm* hv_vm, uint8_t irq, bool asserted) {
+    // hv_gic_set_spi takes the absolute SPI INTID (starting at 32).
+    InterruptRequest req{};
+    req.vector = static_cast<uint32_t>(irq) + 32;
+    req.level_triggered = asserted;
+    hv_vm->RequestInterrupt(req);
+}
+
+void Aarch64Machine::InjectConsoleInput(const uint8_t* data, size_t size) {
+    if (!data || size == 0) return;
+    for (size_t i = 0; i < size; ++i) {
+        uart_.PushInput(data[i]);
+    }
+    uart_.CheckAndRaiseIrq();
+}
+
+void Aarch64Machine::TriggerPowerButton() {
+    // ARM64 doesn't have ACPI power button in the same way.
+    // Use PSCI SYSTEM_OFF or just call shutdown callback directly.
+    if (shutdown_cb_) {
+        shutdown_cb_();
+    }
+}
+
+std::vector<VirtioDeviceSlot> Aarch64Machine::GetVirtioSlots() const {
+    // 8 VirtIO MMIO slots at 0x0A000000 + i*0x200, IRQ = kVirtioBaseIrq + i
+    std::vector<VirtioDeviceSlot> slots;
+    for (int i = 0; i < 8; i++) {
+        slots.push_back({
+            kVirtioMmioBase + static_cast<uint64_t>(i) * kVirtioStride,
+            static_cast<uint8_t>(kVirtioBaseIrq + i)
+        });
+    }
+    return slots;
+}

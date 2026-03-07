@@ -44,26 +44,26 @@ This produces two executables in the build output directory:
 
 ### Prepare VM Images
 
-Run these scripts in WSL2 or Linux:
+Use the Docker wrapper to build images (requires Docker):
 
 ```bash
-# 1. Get a Debian kernel
-./scripts/get-kernel.sh
+# x86_64 images
+./scripts/docker/build.sh x86_64 kernel
+./scripts/docker/build.sh x86_64 initramfs
+./scripts/docker/build.sh x86_64 rootfs
 
-# 2. Build initramfs (includes virtio + ext4 modules)
-./scripts/make-initramfs.sh
-
-# 3. Build a Debian rootfs (Debian Bookworm, XFCE desktop, ~20 GB qcow2)
-sudo ./scripts/make-rootfs.sh
+# arm64 images (for macOS Apple Silicon)
+./scripts/docker/build.sh arm64 kernel
+./scripts/docker/build.sh arm64 initramfs
+./scripts/docker/build.sh arm64 rootfs
 ```
 
 The rootfs script supports incremental builds with a checkpoint system. If interrupted, re-run the same command to resume:
 
 ```bash
-./scripts/make-rootfs.sh --status       # Show build progress
-./scripts/make-rootfs.sh --list-steps   # List all build steps
-./scripts/make-rootfs.sh --force        # Force full rebuild
-./scripts/make-rootfs.sh --edit         # Modify an existing rootfs
+./scripts/docker/build.sh x86_64 rootfs --status       # Show build progress
+./scripts/docker/build.sh x86_64 rootfs --list-steps   # List all build steps
+./scripts/docker/build.sh x86_64 rootfs --force        # Force full rebuild
 ```
 
 ### Run
@@ -136,12 +136,13 @@ src/
 │   └── (business logic) # i18n, VM forms, settings, HTTP download, update checker
 └── runtime/             # VM runtime process entry point & CLI
 scripts/
-├── get-kernel.sh        # Extract vmlinuz from a Debian package
-├── make-initramfs.sh    # Build BusyBox initramfs with kernel modules
-├── make-rootfs.sh       # Build Debian Bookworm rootfs as qcow2
+├── x86_64/              # x86_64 image build scripts
+├── arm64/               # arm64 image build scripts
+├── docker/              # Dockerfile & build.sh wrapper
+├── rootfs-scripts/      # In-chroot setup scripts (shared)
+├── rootfs-services/     # systemd service units (shared)
 ├── extra-modules/       # Additional kernel modules to bundle
-├── rootfs-scripts/      # In-chroot setup scripts
-└── rootfs-services/     # systemd service units installed into the rootfs
+└── mkcpio.py            # CPIO archive generator (shared)
 ```
 
 ### Networking

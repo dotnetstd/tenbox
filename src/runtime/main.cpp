@@ -2,10 +2,12 @@
 #include "version.h"
 #include "core/vmm/vm.h"
 
+#ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#endif
 
 #include <cstdlib>
 #include <cstring>
@@ -25,9 +27,13 @@ static void PrintUsage(const char* prog) {
         "Options:\n"
         "  --vm-id <id>         Runtime vm id (default: default)\n"
         "  --control-endpoint <name>\n"
+#ifdef _WIN32
         "                       Named pipe endpoint (without \\\\.\\pipe\\ prefix)\n"
+#else
+        "                       Unix domain socket path\n"
+#endif
         "  --interactive on|off Console mode (default: on)\n"
-        "  --kernel <path>      Path to vmlinuz (required)\n"
+        "  --kernel <path>      Path to vmlinuz / Image (required)\n"
         "  --initrd <path>      Path to initramfs\n"
         "  --disk <path>        Path to raw / qcow2 disk image\n"
         "  --cmdline <str>      Kernel command line\n"
@@ -42,6 +48,7 @@ static void PrintUsage(const char* prog) {
 }
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
     // Get true Unicode command line, bypassing ANSI codepage on pre-1903 Windows
     int wargc = 0;
     wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
@@ -64,6 +71,7 @@ int main(int argc, char* argv[]) {
         argc = wargc;
         argv = u8argv_ptrs.data();
     }
+#endif
 
     // Set line buffering for stdout/stderr so logs flush on newline
     setvbuf(stdout, nullptr, _IOLBF, BUFSIZ);

@@ -1,13 +1,53 @@
+// ============================================================
+// Socket compatibility layer
+// ============================================================
+
+#ifdef _WIN32
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #define FD_SETSIZE 1024
+#endif
 
 #include "core/net/net_backend.h"
 #include "core/device/virtio/virtio_net.h"
 #include "core/vmm/types.h"
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <iphlpapi.h>
+#ifdef _WIN32
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #include <iphlpapi.h>
+  using SocketHandle = SOCKET;
+  using socklen_t = int;
+  #define SOCK_CLOSE(s)   closesocket(s)
+  #define SOCK_INVALID    INVALID_SOCKET
+  #define SOCK_ERR        SOCKET_ERROR
+  #define SOCK_ERRNO      WSAGetLastError()
+  #define SOCK_WOULDBLOCK WSAEWOULDBLOCK
+  #define SOCK_SETNONBLOCK(s) do { u_long nb_ = 1; ioctlsocket((s), FIONBIO, &nb_); } while(0)
+  #define SOCK_SELECT_NFDS 0
+  #define SOCK_SLEEP_MS(ms) Sleep(ms)
+  #define SOCK_CAST(p) reinterpret_cast<char*>(p)
+  #define SOCK_CCAST(p) reinterpret_cast<const char*>(p)
+#else
+  #include <sys/socket.h>
+  #include <netinet/in.h>
+  #include <arpa/inet.h>
+  #include <fcntl.h>
+  #include <unistd.h>
+  #include <poll.h>
+  #include <errno.h>
+  #include <time.h>
+  using SocketHandle = int;
+  #define SOCK_CLOSE(s)   close(s)
+  #define SOCK_INVALID    (-1)
+  #define SOCK_ERR        (-1)
+  #define SOCK_ERRNO      errno
+  #define SOCK_WOULDBLOCK EWOULDBLOCK
+  #define SOCK_SETNONBLOCK(s) do { int fl_ = fcntl((s), F_GETFL, 0); fcntl((s), F_SETFL, fl_ | O_NONBLOCK); } while(0)
+  #define SOCK_SELECT_NFDS(fds) ((int)(fds) + 1)
+  #define SOCK_SLEEP_MS(ms) usleep((ms) * 1000)
+  #define SOCK_CAST(p) reinterpret_cast<char*>(p)
+  #define SOCK_CCAST(p) reinterpret_cast<const char*>(p)
+#endif
 
 // Windows SDK <iprtrmib.h> (via <iphlpapi.h>) defines IP_STATS, ICMP_STATS,
 // TCP_STATS, UDP_STATS, IP6_STATS as enum values.  lwIP opt.h redefines them
@@ -34,14 +74,32 @@ extern "C" {
 #include <memory>
 #include <algorithm>
 
+#ifdef _WIN32
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
+#endif
+
+// ============================================================
+// Monotonic time (milliseconds)
+// ============================================================
+
+static uint64_t GetMonotonicMs() {
+#ifdef _WIN32
+    return GetTickCount64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000 +
+           static_cast<uint64_t>(ts.tv_nsec) / 1000000;
+#endif
+}
 
 // ============================================================
 // Host DNS resolver lookup
 // ============================================================
 
 static uint32_t GetHostDnsServer() {
+#ifdef _WIN32
     ULONG buf_len = sizeof(FIXED_INFO);
     auto buf = std::make_unique<uint8_t[]>(buf_len);
     DWORD ret = GetNetworkParams(reinterpret_cast<FIXED_INFO*>(buf.get()), &buf_len);
@@ -55,12 +113,32 @@ static uint32_t GetHostDnsServer() {
             unsigned long addr = inet_addr(entry->IpAddress.String);
             if (addr == INADDR_NONE || addr == 0)
                 continue;
-            // Skip loopback — the guest VM cannot reach the host via 127.x.x.x
             if ((ntohl(addr) >> 24) == 127)
                 continue;
             return ntohl(addr);
         }
     }
+#else
+    // Parse /etc/resolv.conf for nameserver entries
+    FILE* fp = fopen("/etc/resolv.conf", "r");
+    if (fp) {
+        char line[256];
+        while (fgets(line, sizeof(line), fp)) {
+            char ns_str[64];
+            if (sscanf(line, "nameserver %63s", ns_str) == 1) {
+                struct in_addr addr;
+                if (inet_pton(AF_INET, ns_str, &addr) == 1) {
+                    uint32_t ip = ntohl(addr.s_addr);
+                    if ((ip >> 24) != 127 && ip != 0) {
+                        fclose(fp);
+                        return ip;
+                    }
+                }
+            }
+        }
+        fclose(fp);
+    }
+#endif
     return 0x08080808; // fallback: 8.8.8.8
 }
 
@@ -172,7 +250,7 @@ static void IncrementalCksumUpdate(uint16_t* cksum,
 // ============================================================
 
 extern "C" u32_t sys_now(void) {
-    return static_cast<u32_t>(GetTickCount64());
+    return static_cast<u32_t>(GetMonotonicMs());
 }
 
 // ============================================================
@@ -208,13 +286,17 @@ static err_t LwipLinkOutput(struct netif* nif, struct pbuf* p) {
 // ============================================================
 
 NetBackend::NetBackend() {
+#ifdef _WIN32
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
 }
 
 NetBackend::~NetBackend() {
     Stop();
+#ifdef _WIN32
     WSACleanup();
+#endif
 }
 
 bool NetBackend::Start(VirtioNetDevice* dev,
@@ -236,8 +318,8 @@ void NetBackend::Stop() {
 
     // Clean up NAT sockets
     for (auto& e : nat_entries_) {
-        if (e->host_socket != INVALID_SOCKET)
-            closesocket(static_cast<SOCKET>(e->host_socket));
+        if (e->host_socket != static_cast<uintptr_t>(SOCK_INVALID))
+            SOCK_CLOSE(static_cast<SocketHandle>(e->host_socket));
         if (e->listen_pcb) tcp_close(static_cast<struct tcp_pcb*>(e->listen_pcb));
         if (e->conn_pcb) tcp_abort(static_cast<struct tcp_pcb*>(e->conn_pcb));
     }
@@ -245,10 +327,10 @@ void NetBackend::Stop() {
 
     for (auto& pf : port_forwards_) {
         if (pf.listener != ~(uintptr_t)0)
-            closesocket(static_cast<SOCKET>(pf.listener));
+            SOCK_CLOSE(static_cast<SocketHandle>(pf.listener));
         for (auto& c : pf.conns) {
             if (c.host_sock != ~(uintptr_t)0)
-                closesocket(static_cast<SOCKET>(c.host_sock));
+                SOCK_CLOSE(static_cast<SocketHandle>(c.host_sock));
         }
     }
 
@@ -319,7 +401,7 @@ void NetBackend::NetworkThread() {
 
     LOG_INFO("Network backend started (gateway 10.0.2.2, guest 10.0.2.15)");
 
-    uint64_t last_cleanup_ms = GetTickCount64();
+    uint64_t last_cleanup_ms = GetMonotonicMs();
 
     while (running_) {
         CheckPendingUpdates();
@@ -335,13 +417,13 @@ void NetBackend::NetworkThread() {
         PollPortForwards();
         sys_check_timeouts();
 
-        uint64_t now = GetTickCount64();
+        uint64_t now = GetMonotonicMs();
         if (now - last_cleanup_ms > 5000) {
             CleanupStaleEntries();
             last_cleanup_ms = now;
         }
 
-        if (!polled) Sleep(1);
+        if (!polled) SOCK_SLEEP_MS(1);
     }
 }
 
@@ -390,7 +472,7 @@ void NetBackend::ProcessPendingTx() {
             continue;
         }
 
-        // External destination: NAT relay via Winsock
+        // External destination: NAT relay via host socket
         uint32_t ip_hdr_len = (ip->ver_ihl & 0xF) * 4;
 
         if (ip->proto == IPPROTO_TCP) {
@@ -428,16 +510,16 @@ void NetBackend::ProcessPendingTx() {
                 if (!entry) continue;
             }
 
-            if (entry->host_socket != INVALID_SOCKET && payload_len > 0) {
+            if (entry->host_socket != SOCK_INVALID && payload_len > 0) {
                 struct sockaddr_in dest{};
                 dest.sin_family = AF_INET;
                 dest.sin_addr.s_addr = htonl(entry->real_dst_ip);
                 dest.sin_port = htons(entry->real_dst_port);
-                sendto(static_cast<SOCKET>(entry->host_socket),
-                       reinterpret_cast<const char*>(frame.data() + udp_off),
+                sendto(static_cast<SocketHandle>(entry->host_socket),
+                       SOCK_CCAST(frame.data() + udp_off),
                        static_cast<int>(payload_len), 0,
                        reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
-                entry->last_active_ms = GetTickCount64();
+                entry->last_active_ms = GetMonotonicMs();
             }
 
         } else if (ip->proto == IPPROTO_ICMP) {
@@ -603,14 +685,14 @@ void NetBackend::InjectFrame(const uint8_t* frame, uint32_t len) {
 
 NetBackend::NatEntry* NetBackend::FindNatEntry(
     uint32_t guest_port, uint32_t dst_ip, uint16_t dst_port, uint8_t proto) {
-    uint64_t now = GetTickCount64();
+    uint64_t now = GetMonotonicMs();
     for (auto& e : nat_entries_) {
         if (e->closed) continue;
         // TCP entry with all resources released: still findable during
         // TIME_WAIT (2*TCP_MSL = 10s) so the close handshake completes,
         // then treated as dead so new connections can be created.
         if (e->proto == IPPROTO_TCP &&
-            e->host_socket == INVALID_SOCKET &&
+            e->host_socket == SOCK_INVALID &&
             !e->conn_pcb && !e->listen_pcb &&
             (now - e->last_active_ms) > 15000) {
             continue;
@@ -635,7 +717,7 @@ NetBackend::NatEntry* NetBackend::CreateNatEntry(
     entry->real_dst_ip = dst_ip;
     entry->real_dst_port = dst_port;
     entry->proxy_port = AllocProxyPort();
-    entry->last_active_ms = GetTickCount64();
+    entry->last_active_ms = GetMonotonicMs();
 
     if (proto == IPPROTO_TCP) {
         // Create lwIP listener on proxy port for this connection
@@ -661,11 +743,10 @@ NetBackend::NatEntry* NetBackend::CreateNatEntry(
             return ERR_OK;
         });
     } else {
-        // UDP: Winsock socket only — no lwIP PCB needed
-        SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
-        if (s == INVALID_SOCKET) return nullptr;
-        u_long nonblock = 1;
-        ioctlsocket(s, FIONBIO, &nonblock);
+        // UDP: host socket only — no lwIP PCB needed
+        SocketHandle s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s == SOCK_INVALID) return nullptr;
+        SOCK_SETNONBLOCK(s);
         entry->host_socket = static_cast<uintptr_t>(s);
     }
 
@@ -697,8 +778,8 @@ bool NetBackend::IsProxyPortInUse(uint16_t port) const {
 }
 
 void NetBackend::RemoveNatEntry(NatEntry* entry) {
-    if (entry->host_socket != INVALID_SOCKET)
-        closesocket(static_cast<SOCKET>(entry->host_socket));
+    if (entry->host_socket != SOCK_INVALID)
+        SOCK_CLOSE(static_cast<SocketHandle>(entry->host_socket));
     if (entry->listen_pcb)
         tcp_close(static_cast<struct tcp_pcb*>(entry->listen_pcb));
     if (entry->conn_pcb) {
@@ -715,7 +796,7 @@ void NetBackend::RemoveNatEntry(NatEntry* entry) {
 }
 
 void NetBackend::CleanupStaleEntries() {
-    uint64_t now = GetTickCount64();
+    uint64_t now = GetMonotonicMs();
     constexpr uint64_t kClosedEntryTimeoutMs  = 5000;    // 5s after err/abort
     constexpr uint64_t kUdpIdleTimeoutMs      = 120000;  // 2min idle for UDP
     constexpr uint64_t kTcpDeadTimeoutMs      = 30000;   // 30s for fully dead TCP
@@ -733,7 +814,7 @@ void NetBackend::CleanupStaleEntries() {
         } else if (e->proto == IPPROTO_UDP) {
             remove = age > kUdpIdleTimeoutMs;
         } else if (e->proto == IPPROTO_TCP) {
-            bool all_released = (e->host_socket == INVALID_SOCKET &&
+            bool all_released = (e->host_socket == SOCK_INVALID &&
                                  !e->conn_pcb && !e->listen_pcb);
             if (all_released) {
                 // Both sides closed, lwIP PCB freed — wait long enough
@@ -745,8 +826,8 @@ void NetBackend::CleanupStaleEntries() {
         }
 
         if (remove) {
-            if (e->host_socket != INVALID_SOCKET)
-                closesocket(static_cast<SOCKET>(e->host_socket));
+            if (e->host_socket != SOCK_INVALID)
+                SOCK_CLOSE(static_cast<SocketHandle>(e->host_socket));
             if (e->listen_pcb)
                 tcp_close(static_cast<struct tcp_pcb*>(e->listen_pcb));
             if (e->conn_pcb) {
@@ -896,8 +977,8 @@ void NetBackend::OnTcpAccepted(NatEntry* entry, void* new_pcb_v) {
     // IMPORTANT: do NOT call RemoveNatEntry / tcp_abort here — we are
     // inside the accept callback and lwIP continues using the PCB after
     // the callback returns.  Gracefully close and let cleanup handle it.
-    SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s == INVALID_SOCKET) {
+    SocketHandle s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == SOCK_INVALID) {
         tcp_arg(new_pcb, nullptr);
         tcp_recv(new_pcb, nullptr);
         tcp_err(new_pcb, nullptr);
@@ -906,8 +987,7 @@ void NetBackend::OnTcpAccepted(NatEntry* entry, void* new_pcb_v) {
         entry->closed = true;
         return;
     }
-    u_long nonblock = 1;
-    ioctlsocket(s, FIONBIO, &nonblock);
+    SOCK_SETNONBLOCK(s);
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -915,8 +995,8 @@ void NetBackend::OnTcpAccepted(NatEntry* entry, void* new_pcb_v) {
     addr.sin_port = htons(entry->real_dst_port);
 
     int ret = connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    if (ret == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK) {
-        closesocket(s);
+    if (ret == SOCK_ERR && SOCK_ERRNO != SOCK_WOULDBLOCK) {
+        SOCK_CLOSE(s);
         tcp_arg(new_pcb, nullptr);
         tcp_recv(new_pcb, nullptr);
         tcp_err(new_pcb, nullptr);
@@ -927,7 +1007,7 @@ void NetBackend::OnTcpAccepted(NatEntry* entry, void* new_pcb_v) {
     }
 
     entry->host_socket = static_cast<uintptr_t>(s);
-    entry->connecting = (ret == SOCKET_ERROR);
+    entry->connecting = (ret == SOCK_ERR);
 }
 
 void NetBackend::OnTcpRecv(NatEntry* entry, void* pcb_v, void* p_v) {
@@ -935,9 +1015,9 @@ void NetBackend::OnTcpRecv(NatEntry* entry, void* pcb_v, void* p_v) {
     auto* p = static_cast<struct pbuf*>(p_v);
 
     if (!p) {
-        if (entry->host_socket != INVALID_SOCKET) {
-            closesocket(static_cast<SOCKET>(entry->host_socket));
-            entry->host_socket = INVALID_SOCKET;
+        if (entry->host_socket != SOCK_INVALID) {
+            SOCK_CLOSE(static_cast<SocketHandle>(entry->host_socket));
+            entry->host_socket = SOCK_INVALID;
         }
         // Clear callbacks before tcp_close: the PCB survives in lwIP's
         // internal lists during the close handshake, but the NatEntry
@@ -947,7 +1027,7 @@ void NetBackend::OnTcpRecv(NatEntry* entry, void* pcb_v, void* p_v) {
         tcp_err(pcb, nullptr);
         tcp_close(pcb);
         entry->conn_pcb = nullptr;
-        entry->last_active_ms = GetTickCount64();
+        entry->last_active_ms = GetMonotonicMs();
         return;
     }
 
@@ -956,7 +1036,7 @@ void NetBackend::OnTcpRecv(NatEntry* entry, void* pcb_v, void* p_v) {
     tcp_recved(pcb, p->tot_len);
     pbuf_free(p);
 
-    entry->last_active_ms = GetTickCount64();
+    entry->last_active_ms = GetMonotonicMs();
 
     if (entry->connecting) {
         entry->pending_data.insert(entry->pending_data.end(),
@@ -972,9 +1052,9 @@ void NetBackend::OnTcpRecv(NatEntry* entry, void* pcb_v, void* p_v) {
 
 void NetBackend::OnTcpErr(NatEntry* entry) {
     entry->conn_pcb = nullptr;
-    if (entry->host_socket != INVALID_SOCKET) {
-        closesocket(static_cast<SOCKET>(entry->host_socket));
-        entry->host_socket = INVALID_SOCKET;
+    if (entry->host_socket != SOCK_INVALID) {
+        SOCK_CLOSE(static_cast<SocketHandle>(entry->host_socket));
+        entry->host_socket = SOCK_INVALID;
     }
     entry->closed = true;
 }
@@ -991,20 +1071,20 @@ void NetBackend::OnUdpRecv(NatEntry* entry, void* pcb_v, void* p_v) {
     pbuf_copy_partial(p, data.data(), p->tot_len, 0);
     pbuf_free(p);
 
-    if (entry->host_socket != INVALID_SOCKET) {
+    if (entry->host_socket != SOCK_INVALID) {
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(entry->real_dst_ip);
         addr.sin_port = htons(entry->real_dst_port);
-        sendto(static_cast<SOCKET>(entry->host_socket),
-               reinterpret_cast<const char*>(data.data()),
+        sendto(static_cast<SocketHandle>(entry->host_socket),
+               SOCK_CCAST(data.data()),
                static_cast<int>(data.size()), 0,
                reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     }
 }
 
 // ============================================================
-// Winsock socket polling
+// Socket polling
 // ============================================================
 
 bool NetBackend::PollSockets() {
@@ -1016,8 +1096,8 @@ bool NetBackend::PollSockets() {
     int count = 0;
 
     for (auto& e : nat_entries_) {
-        SOCKET s = static_cast<SOCKET>(e->host_socket);
-        if (s == INVALID_SOCKET) continue;
+        SocketHandle s = static_cast<SocketHandle>(e->host_socket);
+        if (s == SOCK_INVALID) continue;
         if (e->connecting) {
             FD_SET(s, &wfds);
             count++;
@@ -1046,23 +1126,23 @@ bool NetBackend::PollSockets() {
 
     for (size_t i = 0; i < nat_entries_.size(); i++) {
         auto* e = nat_entries_[i].get();
-        SOCKET s = static_cast<SOCKET>(e->host_socket);
-        if (s == INVALID_SOCKET) continue;
+        SocketHandle s = static_cast<SocketHandle>(e->host_socket);
+        if (s == SOCK_INVALID) continue;
 
         if (e->connecting && FD_ISSET(s, &wfds)) {
             int sock_err = 0;
-            int optlen = sizeof(sock_err);
+            socklen_t optlen = sizeof(sock_err);
             getsockopt(s, SOL_SOCKET, SO_ERROR,
-                       reinterpret_cast<char*>(&sock_err), &optlen);
+                       SOCK_CAST(&sock_err), &optlen);
             if (sock_err != 0) {
-                closesocket(s);
-                e->host_socket = INVALID_SOCKET;
+                SOCK_CLOSE(s);
+                e->host_socket = SOCK_INVALID;
                 e->connecting = false;
                 e->closed = true;
                 continue;
             }
             e->connecting = false;
-            e->last_active_ms = GetTickCount64();
+            e->last_active_ms = GetMonotonicMs();
             // Move pending_data to pending_to_host for proper draining
             if (!e->pending_data.empty()) {
                 e->pending_to_host.insert(e->pending_to_host.end(),
@@ -1107,25 +1187,24 @@ void NetBackend::DrainTcpToGuest(NatEntry* entry) {
 
 void NetBackend::DrainTcpToHost(NatEntry* entry) {
     if (entry->pending_to_host.empty()) return;
-    if (entry->host_socket == INVALID_SOCKET) {
+    if (entry->host_socket == SOCK_INVALID) {
         entry->pending_to_host.clear();
         return;
     }
 
-    SOCKET s = static_cast<SOCKET>(entry->host_socket);
-    int sent = send(s, reinterpret_cast<const char*>(entry->pending_to_host.data()),
+    SocketHandle s = static_cast<SocketHandle>(entry->host_socket);
+    int sent = send(s, SOCK_CCAST(entry->pending_to_host.data()),
                     static_cast<int>(entry->pending_to_host.size()), 0);
 
     if (sent > 0) {
         entry->pending_to_host.erase(
             entry->pending_to_host.begin(),
             entry->pending_to_host.begin() + sent);
-    } else if (sent == SOCKET_ERROR) {
-        int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK) {
-            // Real error, close the connection
-            closesocket(s);
-            entry->host_socket = INVALID_SOCKET;
+    } else if (sent == SOCK_ERR) {
+        int err = SOCK_ERRNO;
+        if (err != SOCK_WOULDBLOCK) {
+            SOCK_CLOSE(s);
+            entry->host_socket = SOCK_INVALID;
             entry->pending_to_host.clear();
             if (entry->conn_pcb) {
                 auto* pcb = static_cast<struct tcp_pcb*>(entry->conn_pcb);
@@ -1137,13 +1216,13 @@ void NetBackend::DrainTcpToHost(NatEntry* entry) {
             }
             entry->closed = true;
         }
-        // WSAEWOULDBLOCK: will retry on next poll
+        // SOCK_WOULDBLOCK: will retry on next poll
     }
 }
 
 void NetBackend::HandleTcpReadable(NatEntry* entry) {
     char buf[32768];
-    SOCKET s = static_cast<SOCKET>(entry->host_socket);
+    SocketHandle s = static_cast<SocketHandle>(entry->host_socket);
     int n = recv(s, buf, sizeof(buf), 0);
 
     if (n <= 0) {
@@ -1159,27 +1238,27 @@ void NetBackend::HandleTcpReadable(NatEntry* entry) {
             tcp_close(pcb);
             entry->conn_pcb = nullptr;
         }
-        closesocket(s);
-        entry->host_socket = INVALID_SOCKET;
-        entry->last_active_ms = GetTickCount64();
+        SOCK_CLOSE(s);
+        entry->host_socket = SOCK_INVALID;
+        entry->last_active_ms = GetMonotonicMs();
         return;
     }
 
-    entry->last_active_ms = GetTickCount64();
+    entry->last_active_ms = GetMonotonicMs();
     entry->pending_to_guest.insert(entry->pending_to_guest.end(), buf, buf + n);
     DrainTcpToGuest(entry);
 }
 
 void NetBackend::HandleUdpReadable(NatEntry* entry) {
     char buf[2048];
-    SOCKET s = static_cast<SOCKET>(entry->host_socket);
+    SocketHandle s = static_cast<SocketHandle>(entry->host_socket);
     struct sockaddr_in from{};
-    int fromlen = sizeof(from);
+    socklen_t fromlen = sizeof(from);
     int n = recvfrom(s, buf, sizeof(buf), 0,
                      reinterpret_cast<sockaddr*>(&from), &fromlen);
     if (n <= 0) return;
 
-    entry->last_active_ms = GetTickCount64();
+    entry->last_active_ms = GetMonotonicMs();
 
     // Build Ethernet + IP + UDP frame directly (bypass lwIP for responses)
     uint32_t frame_len = sizeof(EthHdr) + 20 + sizeof(UdpHdr) + n;
@@ -1235,19 +1314,18 @@ void NetBackend::DrainPfToHost(PfEntry::Conn& conn) {
         return;
     }
 
-    SOCKET s = static_cast<SOCKET>(conn.host_sock);
-    int sent = send(s, reinterpret_cast<const char*>(conn.pending_to_host.data()),
+    SocketHandle s = static_cast<SocketHandle>(conn.host_sock);
+    int sent = send(s, SOCK_CCAST(conn.pending_to_host.data()),
                     static_cast<int>(conn.pending_to_host.size()), 0);
 
     if (sent > 0) {
         conn.pending_to_host.erase(
             conn.pending_to_host.begin(),
             conn.pending_to_host.begin() + sent);
-    } else if (sent == SOCKET_ERROR) {
-        int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK) {
-            // Real error, close the connection
-            closesocket(s);
+    } else if (sent == SOCK_ERR) {
+        int err = SOCK_ERRNO;
+        if (err != SOCK_WOULDBLOCK) {
+            SOCK_CLOSE(s);
             conn.host_sock = ~(uintptr_t)0;
             conn.pending_to_host.clear();
             if (conn.guest_pcb) {
@@ -1259,7 +1337,7 @@ void NetBackend::DrainPfToHost(PfEntry::Conn& conn) {
                 conn.guest_pcb = nullptr;
             }
         }
-        // WSAEWOULDBLOCK: will retry on next poll
+        // SOCK_WOULDBLOCK: will retry on next poll
     }
 }
 
@@ -1270,21 +1348,20 @@ void NetBackend::DrainPfToHost(PfEntry::Conn& conn) {
 void NetBackend::HandleIcmpOut(uint32_t src_ip, uint32_t dst_ip,
                                 const uint8_t* icmp_data, uint32_t icmp_len) {
     if (icmp_socket_ == ~(uintptr_t)0) {
-        SOCKET s = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
-        if (s == INVALID_SOCKET) {
+        SocketHandle s = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+        if (s == SOCK_INVALID) {
             LOG_ERROR("Failed to create ICMP socket (need admin?)");
             return;
         }
-        u_long nonblock = 1;
-        ioctlsocket(s, FIONBIO, &nonblock);
+        SOCK_SETNONBLOCK(s);
         icmp_socket_ = static_cast<uintptr_t>(s);
     }
 
     struct sockaddr_in dest{};
     dest.sin_family = AF_INET;
     dest.sin_addr.s_addr = htonl(dst_ip);
-    int sent = sendto(static_cast<SOCKET>(icmp_socket_),
-                      reinterpret_cast<const char*>(icmp_data),
+    int sent = sendto(static_cast<SocketHandle>(icmp_socket_),
+                      SOCK_CCAST(icmp_data),
                       static_cast<int>(icmp_len), 0,
                       reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
     (void)sent;
@@ -1292,7 +1369,7 @@ void NetBackend::HandleIcmpOut(uint32_t src_ip, uint32_t dst_ip,
 
 void NetBackend::PollIcmpSocket() {
     if (icmp_socket_ == ~(uintptr_t)0) return;
-    SOCKET s = static_cast<SOCKET>(icmp_socket_);
+    SocketHandle s = static_cast<SocketHandle>(icmp_socket_);
 
     fd_set rfds;
     FD_ZERO(&rfds);
@@ -1302,12 +1379,12 @@ void NetBackend::PollIcmpSocket() {
 
     char buf[2048];
     struct sockaddr_in from{};
-    int fromlen = sizeof(from);
+    socklen_t fromlen = sizeof(from);
     int n = recvfrom(s, buf, sizeof(buf), 0,
                      reinterpret_cast<sockaddr*>(&from), &fromlen);
     if (n <= 0) return;
 
-    // Winsock raw ICMP recv includes the IP header; skip it
+    // Raw ICMP recv includes the IP header; skip it
     if (n < 20) return;
     auto* recv_ip = reinterpret_cast<IpHdr*>(buf);
     uint32_t recv_ip_hdr_len = (recv_ip->ver_ihl & 0xF) * 4;
@@ -1347,12 +1424,12 @@ void NetBackend::PollIcmpSocket() {
 void NetBackend::TeardownPortForwards() {
     for (auto& pf : port_forwards_) {
         if (pf.listener != ~(uintptr_t)0) {
-            closesocket(static_cast<SOCKET>(pf.listener));
+            SOCK_CLOSE(static_cast<SocketHandle>(pf.listener));
             pf.listener = ~(uintptr_t)0;
         }
         for (auto& c : pf.conns) {
             if (c.host_sock != ~(uintptr_t)0)
-                closesocket(static_cast<SOCKET>(c.host_sock));
+                SOCK_CLOSE(static_cast<SocketHandle>(c.host_sock));
             if (c.guest_pcb) {
                 auto* pcb = static_cast<struct tcp_pcb*>(c.guest_pcb);
                 tcp_arg(pcb, nullptr);
@@ -1399,31 +1476,33 @@ std::vector<uint16_t> NetBackend::SetupPortForwards() {
     std::vector<uint16_t> failed_ports;
 
     for (auto& pf : port_forwards_) {
-        SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
-        if (s == INVALID_SOCKET) {
+        SocketHandle s = socket(AF_INET, SOCK_STREAM, 0);
+        if (s == SOCK_INVALID) {
             LOG_ERROR("Port forward: failed to create listener for port %u", pf.host_port);
             failed_ports.push_back(pf.host_port);
             continue;
         }
-        // Use SO_EXCLUSIVEADDRUSE on Windows to prevent port hijacking.
-        // Unlike SO_REUSEADDR which allows multiple binds to the same port,
-        // this ensures we get an error if the port is already in use.
+#ifdef _WIN32
         int exclusive = 1;
         setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
-                   reinterpret_cast<const char*>(&exclusive), sizeof(exclusive));
+                   SOCK_CCAST(&exclusive), sizeof(exclusive));
+#else
+        int reuse = 1;
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR,
+                   SOCK_CCAST(&reuse), sizeof(reuse));
+#endif
 
-        u_long nonblock = 1;
-        ioctlsocket(s, FIONBIO, &nonblock);
+        SOCK_SETNONBLOCK(s);
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);  // bind to 127.0.0.1 only for security
         addr.sin_port = htons(pf.host_port);
 
-        if (bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR ||
-            listen(s, 5) == SOCKET_ERROR) {
+        if (bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCK_ERR ||
+            listen(s, 5) == SOCK_ERR) {
             LOG_ERROR("Port forward: failed to bind/listen on port %u", pf.host_port);
-            closesocket(s);
+            SOCK_CLOSE(s);
             failed_ports.push_back(pf.host_port);
             continue;
         }
@@ -1438,7 +1517,7 @@ std::vector<uint16_t> NetBackend::SetupPortForwards() {
 void NetBackend::PollPortForwards() {
     for (auto& pf : port_forwards_) {
         if (pf.listener == ~(uintptr_t)0) continue;
-        SOCKET ls = static_cast<SOCKET>(pf.listener);
+        SocketHandle ls = static_cast<SocketHandle>(pf.listener);
 
         // Check for new connections
         fd_set rfds;
@@ -1446,10 +1525,9 @@ void NetBackend::PollPortForwards() {
         FD_SET(ls, &rfds);
         struct timeval tv = {0, 0};
         if (select(0, &rfds, nullptr, nullptr, &tv) > 0 && FD_ISSET(ls, &rfds)) {
-            SOCKET cs = accept(ls, nullptr, nullptr);
-            if (cs != INVALID_SOCKET) {
-                u_long nonblock = 1;
-                ioctlsocket(cs, FIONBIO, &nonblock);
+            SocketHandle cs = accept(ls, nullptr, nullptr);
+            if (cs != SOCK_INVALID) {
+                SOCK_SETNONBLOCK(cs);
 
                 // Create lwIP TCP connection to guest
                 struct tcp_pcb* pcb = tcp_new();
@@ -1471,7 +1549,7 @@ void NetBackend::PollPortForwards() {
                     }
                     if (!p) {
                         if (c->host_sock != ~(uintptr_t)0) {
-                            closesocket(static_cast<SOCKET>(c->host_sock));
+                            SOCK_CLOSE(static_cast<SocketHandle>(c->host_sock));
                             c->host_sock = ~(uintptr_t)0;
                         }
                         tcp_arg(pcb, nullptr);
@@ -1496,7 +1574,7 @@ void NetBackend::PollPortForwards() {
                     if (!c) return;
                     c->guest_pcb = nullptr;
                     if (c->host_sock != ~(uintptr_t)0) {
-                        closesocket(static_cast<SOCKET>(c->host_sock));
+                        SOCK_CLOSE(static_cast<SocketHandle>(c->host_sock));
                         c->host_sock = ~(uintptr_t)0;
                     }
                 });
@@ -1526,7 +1604,7 @@ void NetBackend::PollPortForwards() {
             if (!c.pending_to_guest.empty())
                 continue; // back-pressure: don't read until drained
 
-            SOCKET s = static_cast<SOCKET>(c.host_sock);
+            SocketHandle s = static_cast<SocketHandle>(c.host_sock);
             fd_set wfds;
             FD_ZERO(&rfds);
             FD_ZERO(&wfds);
@@ -1547,7 +1625,7 @@ void NetBackend::PollPortForwards() {
                 char buf[4096];
                 int n = recv(s, buf, sizeof(buf), 0);
                 if (n <= 0) {
-                    closesocket(s);
+                    SOCK_CLOSE(s);
                     c.host_sock = ~(uintptr_t)0;
                     if (c.guest_pcb) {
                         auto* p = static_cast<struct tcp_pcb*>(c.guest_pcb);

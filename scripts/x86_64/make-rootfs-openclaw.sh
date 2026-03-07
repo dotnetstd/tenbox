@@ -35,7 +35,7 @@ kmod,pciutils,usbutils,\
 coreutils,findutils,grep,gawk,sed,tar,gzip,bzip2,xz-utils"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/../build"
+BUILD_DIR="$SCRIPT_DIR/../../build"
 mkdir -p "$BUILD_DIR"
 
 # Cache directories
@@ -51,7 +51,7 @@ CACHE_NODESOURCE="$SCRIPTS_CACHE_DIR/nodesource_setup_22.x.sh"
 CACHE_OPENCLAW="$SCRIPTS_CACHE_DIR/openclaw_install.sh"
 
 # Work dir must be on WSL Linux FS (/tmp), not NTFS (DrvFS /mnt/*) - loop devices need mknod
-WORK_DIR="/tmp/tenbox-rootfs-openclaw"
+WORK_DIR="${TENBOX_WORK_DIR:-/tmp/tenbox-rootfs-openclaw}"
 
 # Parse arguments
 FORCE_REBUILD=false
@@ -346,8 +346,8 @@ PRC
     fi
     
     # Copy rootfs helper scripts and services
-    sudo cp -r "$SCRIPT_DIR/rootfs-scripts" "$MOUNT_DIR/tmp/"
-    sudo cp -r "$SCRIPT_DIR/rootfs-services" "$MOUNT_DIR/tmp/"
+    sudo cp -r "$SCRIPT_DIR/../rootfs-scripts" "$MOUNT_DIR/tmp/"
+    sudo cp -r "$SCRIPT_DIR/../rootfs-services" "$MOUNT_DIR/tmp/"
 }
 
 do_config_basic() {
@@ -894,7 +894,7 @@ do_convert_qcow2() {
         "$WIN_QEMU" convert -f raw -O qcow2 -o cluster_size=65536,compression_type=zstd -c "$WIN_RAW" "$WIN_OUTPUT"
     else
         echo "  Using WSL qemu-img with zlib compression..."
-        qemu-img convert -f raw -O qcow2 -o cluster_size=65536 -c "$WORK_DIR/rootfs.raw" "$OUTPUT"
+        qemu-img convert -f raw -O qcow2 -o cluster_size=65536,compression_type=zstd -c "$WORK_DIR/rootfs.raw" "$OUTPUT"
     fi
 }
 

@@ -1,9 +1,16 @@
-add_executable(tenbox-vm-runtime
+set(RUNTIME_SOURCES
     ${CMAKE_SOURCE_DIR}/src/runtime/main.cpp
     ${CMAKE_SOURCE_DIR}/src/runtime/runtime_service.cpp
-    ${CMAKE_SOURCE_DIR}/src/runtime/runtime.rc
-    ${CMAKE_SOURCE_DIR}/src/runtime/app.manifest
 )
+
+if(WIN32)
+    list(APPEND RUNTIME_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/runtime/runtime.rc
+        ${CMAKE_SOURCE_DIR}/src/runtime/app.manifest
+    )
+endif()
+
+add_executable(tenbox-vm-runtime ${RUNTIME_SOURCES})
 
 target_include_directories(tenbox-vm-runtime
     PRIVATE
@@ -16,5 +23,13 @@ target_link_libraries(tenbox-vm-runtime
         tenbox_platform
         tenbox_core
         tenbox_ipc
-        ws2_32
 )
+
+if(WIN32)
+    target_link_libraries(tenbox-vm-runtime PRIVATE ws2_32)
+elseif(APPLE)
+    target_link_libraries(tenbox-vm-runtime PRIVATE
+        "-framework Hypervisor"
+        "-framework Foundation"
+    )
+endif()

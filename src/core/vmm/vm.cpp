@@ -1,25 +1,32 @@
 #include "core/vmm/vm.h"
-#include "core/arch/x86_64/boot.h"
-#include "platform/windows/hypervisor/whvp_vm.h"
-#include "platform/windows/console/std_console_port.h"
+#include "core/vmm/vm_platform.h"
 #include <algorithm>
 
-static constexpr uint64_t kVirtioMmioBase       = 0xd0000000;
-static constexpr uint8_t  kVirtioBlkIrq         = 5;
-static constexpr uint64_t kVirtioNetMmioBase    = 0xd0000200;
-static constexpr uint8_t  kVirtioNetIrq         = 6;
-static constexpr uint64_t kVirtioKbdMmioBase    = 0xd0000400;
-static constexpr uint8_t  kVirtioKbdIrq         = 11;
-static constexpr uint64_t kVirtioTabletMmioBase = 0xd0000600;
-static constexpr uint8_t  kVirtioTabletIrq      = 14;
-static constexpr uint64_t kVirtioGpuMmioBase    = 0xd0000800;
-static constexpr uint8_t  kVirtioGpuIrq         = 15;
-static constexpr uint64_t kVirtioSerialMmioBase = 0xd0000a00;
-static constexpr uint8_t  kVirtioSerialIrq      = 7;
-static constexpr uint64_t kVirtioFsMmioBase     = 0xd0000c00;
-static constexpr uint8_t  kVirtioFsBaseIrq      = 16;
-static constexpr uint64_t kVirtioSndMmioBase    = 0xd0000e00;
-static constexpr uint8_t  kVirtioSndIrq         = 17;
+#ifdef _WIN32
+#include "core/arch/x86_64/x86_machine.h"
+#elif defined(__APPLE__) && defined(__aarch64__)
+#include "core/arch/aarch64/aarch64_machine.h"
+#include "platform/macos/hypervisor/hvf_vcpu.h"
+#endif
+
+static std::unique_ptr<MachineModel> CreateMachineModel() {
+#ifdef _WIN32
+    return std::make_unique<X86Machine>();
+#elif defined(__APPLE__) && defined(__aarch64__)
+    return std::make_unique<Aarch64Machine>();
+#else
+    LOG_ERROR("No machine model available for this platform/architecture");
+    return nullptr;
+#endif
+}
+
+static std::string GetDefaultCmdline() {
+#ifdef __aarch64__
+    return "console=ttyAMA0 earlycon root=/dev/vda1 rw";
+#else
+    return "console=ttyS0 earlyprintk=serial lapic no_timer_check tsc=reliable i8042.noprobe";
+#endif
+}
 
 Vm::~Vm() {
     running_ = false;
@@ -31,9 +38,6 @@ Vm::~Vm() {
         if (t.joinable()) t.join();
     }
 
-    // Clear callbacks before destroying objects they reference.
-    // This prevents use-after-free when unique_ptrs are destroyed
-    // in reverse declaration order.
     if (vdagent_handler_) {
         vdagent_handler_->SetClipboardCallback(nullptr);
     }
@@ -46,8 +50,6 @@ Vm::~Vm() {
         virtio_gpu_->SetScanoutStateCallback(nullptr);
     }
 
-    // Stop network backend before releasing guest memory, as its
-    // thread may still be accessing virtio_net_ and mem_.
     if (net_backend_) {
         net_backend_->Stop();
     }
@@ -55,15 +57,14 @@ Vm::~Vm() {
     vcpus_.clear();
     hv_vm_.reset();
     if (mem_.base) {
-        VirtualFree(mem_.base, 0, MEM_RELEASE);
+        VmPlatform::FreeRam(mem_.base, mem_.alloc_size);
         mem_.base = nullptr;
     }
 }
 
 std::unique_ptr<Vm> Vm::Create(const VmConfig& config) {
-    if (!whvp::IsHypervisorPresent()) {
-        LOG_ERROR("Windows Hypervisor Platform is not available.");
-        LOG_ERROR("Please enable Hyper-V in Windows Features.");
+    if (!VmPlatform::IsHypervisorPresent()) {
+        LOG_ERROR("Hardware hypervisor is not available on this platform.");
         return nullptr;
     }
 
@@ -74,104 +75,82 @@ std::unique_ptr<Vm> Vm::Create(const VmConfig& config) {
     vm->clipboard_port_ = config.clipboard_port;
     vm->audio_port_ = config.audio_port;
     if (!vm->console_port_ && config.interactive) {
-        vm->console_port_ = std::make_shared<StdConsolePort>();
+        vm->console_port_ = VmPlatform::CreateConsolePort();
     }
-    uint64_t ram_bytes = config.memory_mb * 1024 * 1024;
 
-    vm->hv_vm_ = whvp::WhvpVm::Create(config.cpu_count);
+    vm->machine_ = CreateMachineModel();
+    if (!vm->machine_) return nullptr;
+
+    vm->hv_vm_ = VmPlatform::CreateHypervisor(config.cpu_count);
     if (!vm->hv_vm_) return nullptr;
 
+    uint64_t ram_bytes = config.memory_mb * 1024 * 1024;
     if (!vm->AllocateMemory(ram_bytes)) return nullptr;
 
-    if (!vm->SetupDevices()) return nullptr;
+    if (!vm->machine_->SetupPlatformDevices(
+            vm->addr_space_, vm->mem_, vm->hv_vm_.get(),
+            vm->console_port_,
+            [&vm_ref = *vm]() { vm_ref.RequestStop(); },
+            [&vm_ref = *vm]() { vm_ref.RequestReboot(); })) {
+        LOG_ERROR("Failed to set up platform devices");
+        return nullptr;
+    }
+
+    auto slots = vm->machine_->GetVirtioSlots();
 
     if (!config.disk_path.empty()) {
-        if (!vm->SetupVirtioBlk(config.disk_path)) return nullptr;
+        if (!vm->SetupVirtioBlk(config.disk_path, slots[0])) return nullptr;
     }
 
-    if (!vm->SetupVirtioNet(config.net_link_up, config.port_forwards))
+    if (!vm->SetupVirtioNet(config.net_link_up, config.port_forwards, slots[1]))
         return nullptr;
 
-    if (!vm->SetupVirtioInput()) return nullptr;
+    if (!vm->SetupVirtioInput(slots[2], slots[3])) return nullptr;
 
-    if (!vm->SetupVirtioGpu(config.display_width, config.display_height))
+    if (!vm->SetupVirtioGpu(config.display_width, config.display_height, slots[4]))
         return nullptr;
 
-    if (!vm->SetupVirtioSerial())
+    if (!vm->SetupVirtioSerial(slots[5]))
         return nullptr;
 
-    // Always create virtiofs device for dynamic share management
-    if (!vm->SetupVirtioFs(config.shared_folders))
+    if (!vm->SetupVirtioFs(config.shared_folders, slots[6]))
         return nullptr;
 
-    if (!vm->SetupVirtioSnd())
+    if (!vm->SetupVirtioSnd(slots[7]))
         return nullptr;
 
-    // Register virtio-mmio devices for ACPI DSDT so the kernel discovers
-    // them via the "LNRO0005" HID in the virtio_mmio driver.
-    if (vm->virtio_mmio_) {
-        vm->virtio_acpi_devs_.push_back({
-            kVirtioMmioBase,
-            static_cast<uint32_t>(VirtioMmioDevice::kMmioSize),
-            kVirtioBlkIrq});
-    }
-    if (vm->virtio_mmio_net_) {
-        vm->virtio_acpi_devs_.push_back({
-            kVirtioNetMmioBase,
-            static_cast<uint32_t>(VirtioMmioDevice::kMmioSize),
-            kVirtioNetIrq});
-    }
-    if (vm->virtio_mmio_kbd_) {
-        vm->virtio_acpi_devs_.push_back({
-            kVirtioKbdMmioBase,
-            static_cast<uint32_t>(VirtioMmioDevice::kMmioSize),
-            kVirtioKbdIrq});
-    }
-    if (vm->virtio_mmio_tablet_) {
-        vm->virtio_acpi_devs_.push_back({
-            kVirtioTabletMmioBase,
-            static_cast<uint32_t>(VirtioMmioDevice::kMmioSize),
-            kVirtioTabletIrq});
-    }
-    if (vm->virtio_mmio_gpu_) {
-        vm->virtio_acpi_devs_.push_back({
-            kVirtioGpuMmioBase,
-            static_cast<uint32_t>(VirtioMmioDevice::kMmioSize),
-            kVirtioGpuIrq});
-    }
-    if (vm->virtio_mmio_serial_) {
-        vm->virtio_acpi_devs_.push_back({
-            kVirtioSerialMmioBase,
-            static_cast<uint32_t>(VirtioMmioDevice::kMmioSize),
-            kVirtioSerialIrq});
-    }
-    if (vm->virtio_mmio_fs_) {
-        vm->virtio_acpi_devs_.push_back({
-            kVirtioFsMmioBase,
-            static_cast<uint32_t>(VirtioMmioDevice::kMmioSize),
-            kVirtioFsBaseIrq});
-    }
-    if (vm->virtio_mmio_snd_) {
-        vm->virtio_acpi_devs_.push_back({
-            kVirtioSndMmioBase,
-            static_cast<uint32_t>(VirtioMmioDevice::kMmioSize),
-            kVirtioSndIrq});
+    // Use config cmdline, fall back to platform default
+    VmConfig effective_config = config;
+    if (effective_config.cmdline.empty()) {
+        effective_config.cmdline = GetDefaultCmdline();
     }
 
-    if (!vm->LoadKernel(config)) return nullptr;
+    if (!vm->machine_->LoadKernel(effective_config, vm->mem_, vm->active_virtio_slots_)) {
+        LOG_ERROR("Failed to load kernel");
+        return nullptr;
+    }
 
     vm->cpu_count_ = config.cpu_count;
+
+#ifdef __APPLE__
+    vm->vcpus_.resize(config.cpu_count);
+    // Allocate per-CPU state for secondary PSCI wakeup
+    vm->secondary_cpu_states_.resize(config.cpu_count);
+    for (uint32_t i = 0; i < config.cpu_count; i++) {
+        vm->secondary_cpu_states_[i] = std::make_unique<Vm::SecondaryCpuState>();
+    }
+#else
     for (uint32_t i = 0; i < config.cpu_count; i++) {
         auto vcpu = vm->hv_vm_->CreateVCpu(i, &vm->addr_space_);
         if (!vcpu) return nullptr;
         vm->vcpus_.push_back(std::move(vcpu));
     }
 
-    // Only BSP (vCPU 0) gets initial registers; APs wait for SIPI.
-    if (!vm->vcpus_[0]->SetupBootRegisters(vm->mem_.base)) {
+    if (!vm->machine_->SetupBootVCpu(vm->vcpus_[0].get(), vm->mem_.base)) {
         LOG_ERROR("Failed to set initial vCPU registers");
         return nullptr;
     }
+#endif
 
     LOG_INFO("VM created successfully (%u vCPUs)", config.cpu_count);
     return vm;
@@ -180,108 +159,94 @@ std::unique_ptr<Vm> Vm::Create(const VmConfig& config) {
 bool Vm::AllocateMemory(uint64_t size) {
     uint64_t alloc = AlignUp(size, kPageSize);
 
-    uint8_t* base = static_cast<uint8_t*>(
-        VirtualAlloc(nullptr, alloc,
-                     MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    uint8_t* base = VmPlatform::AllocateRam(alloc);
     if (!base) {
-        LOG_ERROR("VirtualAlloc(%llu MB) failed", alloc / (1024 * 1024));
+        LOG_ERROR("Failed to allocate %llu MB guest RAM",
+                  (unsigned long long)(alloc / (1024 * 1024)));
         return false;
     }
+
+    GPA mmio_gap_start = machine_->MmioGapStart();
+    GPA mmio_gap_end = machine_->MmioGapEnd();
+    GPA ram_base = machine_->RamBase();
 
     mem_.base = base;
     mem_.alloc_size = alloc;
+    mem_.ram_base = ram_base;
 
-    // If total RAM fits below the MMIO gap there is no split needed.
-    mem_.low_size  = std::min(alloc, kMmioGapStart);
-    mem_.high_size = (alloc > kMmioGapStart) ? (alloc - kMmioGapStart) : 0;
-    mem_.high_base = mem_.high_size ? kMmioGapEnd : 0;
+    if (ram_base == 0) {
+        // x86-style layout: RAM at GPA 0 with MMIO gap in the middle
+        mem_.low_size  = std::min(alloc, mmio_gap_start);
+        mem_.high_size = (alloc > mmio_gap_start) ? (alloc - mmio_gap_start) : 0;
+        mem_.high_base = mem_.high_size ? mmio_gap_end : 0;
 
-    // Map the low region: GPA [0, low_size) -> HVA [base, base+low_size)
-    if (!hv_vm_->MapMemory(0, base, mem_.low_size, /*writable=*/true))
-        return false;
-
-    // Map the high region above the 4 GiB boundary if present.
-    if (mem_.high_size) {
-        if (!hv_vm_->MapMemory(kMmioGapEnd, base + mem_.low_size,
-                                mem_.high_size, /*writable=*/true))
+        if (!hv_vm_->MapMemory(0, base, mem_.low_size, true))
             return false;
-        LOG_INFO("Guest RAM: %llu MB  [0-0x%llX] + [0x%llX-0x%llX] at HVA %p",
-                 alloc / (1024 * 1024),
-                 mem_.low_size - 1,
-                 kMmioGapEnd, kMmioGapEnd + mem_.high_size - 1,
-                 base);
+
+        if (mem_.high_size) {
+            if (!hv_vm_->MapMemory(mmio_gap_end, base + mem_.low_size,
+                                    mem_.high_size, true))
+                return false;
+            LOG_INFO("Guest RAM: %llu MB  [0-0x%llX] + [0x%llX-0x%llX] at HVA %p",
+                     (unsigned long long)(alloc / (1024 * 1024)),
+                     (unsigned long long)(mem_.low_size - 1),
+                     (unsigned long long)mmio_gap_end,
+                     (unsigned long long)(mmio_gap_end + mem_.high_size - 1),
+                     base);
+        } else {
+            LOG_INFO("Guest RAM: %llu MB at HVA %p",
+                     (unsigned long long)(alloc / (1024 * 1024)), base);
+        }
     } else {
-        LOG_INFO("Guest RAM: %llu MB at HVA %p",
-                 alloc / (1024 * 1024), base);
+        // ARM-style layout: RAM starts at a high base, MMIO below
+        mem_.low_size  = alloc;
+        mem_.high_size = 0;
+        mem_.high_base = 0;
+
+        if (!hv_vm_->MapMemory(ram_base, base, alloc, true))
+            return false;
+
+        LOG_INFO("Guest RAM: %llu MB at GPA 0x%llX, HVA %p",
+                 (unsigned long long)(alloc / (1024 * 1024)),
+                 (unsigned long long)ram_base, base);
     }
     return true;
 }
 
-bool Vm::SetupDevices() {
-    uart_.SetIrqCallback([this]() { InjectIrq(4); });
-    uart_.SetTxCallback([this](uint8_t byte) {
-        if (!console_port_) return;
-        console_port_->Write(&byte, 1);
-    });
-    addr_space_.AddPioDevice(
-        Uart16550::kCom1Base, Uart16550::kRegCount, &uart_);
-    addr_space_.AddPioDevice(
-        I8254Pit::kBasePort, I8254Pit::kRegCount, &pit_);
-    sys_ctrl_b_.SetPit(&pit_);
-    addr_space_.AddPioDevice(
-        SystemControlB::kPort, SystemControlB::kRegCount, &sys_ctrl_b_);
-    addr_space_.AddPioDevice(
-        CmosRtc::kBasePort, CmosRtc::kRegCount, &rtc_);
-    addr_space_.AddMmioDevice(
-        IoApic::kBaseAddress, IoApic::kSize, &ioapic_);
-    acpi_pm_.SetShutdownCallback([this]() { RequestStop(); });
-    acpi_pm_.SetResetCallback([this]() { RequestReboot(); });
-    acpi_pm_.SetSciCallback([this]() { InjectIrq(9); });
-    addr_space_.AddPioDevice(
-        AcpiPm::kBasePort, AcpiPm::kRegCount, &acpi_pm_);
-
-    addr_space_.AddPioDevice(
-        I8259Pic::kMasterBase, I8259Pic::kRegCount, &pic_master_);
-    addr_space_.AddPioDevice(
-        I8259Pic::kSlaveBase, I8259Pic::kRegCount, &pic_slave_);
-    addr_space_.AddPioDevice(
-        PciHostBridge::kBasePort, PciHostBridge::kRegCount, &pci_host_);
-
-    // Silent sinks for harmless legacy ports:
-    //   0x80  — POST diagnostic / IO delay
-    //   0x87  — DMA page register
-    //   0x2E8 — COM4   0x2F8 — COM2   0x3E8 — COM3
-    addr_space_.AddPioDevice(0x80,  1, &port_sink_);
-    addr_space_.AddPioDevice(0x87,  1, &port_sink_);
-    addr_space_.AddPioDevice(0x2E8, 8, &port_sink_);
-    addr_space_.AddPioDevice(0x2F8, 8, &port_sink_);
-    addr_space_.AddPioDevice(0x3E8, 8, &port_sink_);
-    addr_space_.AddPioDevice(0xC000, 0x1000, &port_sink_);  // PCI mechanism #2 data ports
-    return true;
+void Vm::InjectIrq(uint8_t irq) {
+    machine_->InjectIrq(hv_vm_.get(), irq);
 }
 
-bool Vm::SetupVirtioBlk(const std::string& disk_path) {
+void Vm::SetIrqLevel(uint8_t irq, bool asserted) {
+    machine_->SetIrqLevel(hv_vm_.get(), irq, asserted);
+}
+
+bool Vm::SetupVirtioBlk(const std::string& disk_path, const VirtioDeviceSlot& slot) {
     virtio_blk_ = std::make_unique<VirtioBlkDevice>();
     if (!virtio_blk_->Open(disk_path)) return false;
 
     virtio_mmio_ = std::make_unique<VirtioMmioDevice>();
     virtio_mmio_->Init(virtio_blk_.get(), mem_);
-    virtio_mmio_->SetIrqCallback([this]() { InjectIrq(kVirtioBlkIrq); });
+    virtio_mmio_->SetIrqCallback([this, irq = slot.irq]() { InjectIrq(irq); });
+    virtio_mmio_->SetIrqLevelCallback([this, irq = slot.irq](bool a) { SetIrqLevel(irq, a); });
     virtio_blk_->SetMmioDevice(virtio_mmio_.get());
 
     addr_space_.AddMmioDevice(
-        kVirtioMmioBase, VirtioMmioDevice::kMmioSize, virtio_mmio_.get());
+        slot.mmio_base, VirtioMmioDevice::kMmioSize, virtio_mmio_.get());
+    active_virtio_slots_.push_back(slot);
     return true;
 }
 
-bool Vm::SetupVirtioNet(bool link_up, const std::vector<PortForward>& forwards) {
+bool Vm::SetupVirtioNet(bool link_up, const std::vector<PortForward>& forwards,
+                        const VirtioDeviceSlot& slot) {
     net_backend_ = std::make_unique<NetBackend>();
     virtio_net_ = std::make_unique<VirtioNetDevice>(link_up);
     net_backend_->SetLinkUp(link_up);
 
     virtio_mmio_net_ = std::make_unique<VirtioMmioDevice>();
     virtio_mmio_net_->Init(virtio_net_.get(), mem_);
-    virtio_mmio_net_->SetIrqCallback([this]() { InjectIrq(kVirtioNetIrq); });
+    virtio_mmio_net_->SetIrqCallback([this, irq = slot.irq]() { InjectIrq(irq); });
+    virtio_mmio_net_->SetIrqLevelCallback([this, irq = slot.irq](bool a) { SetIrqLevel(irq, a); });
     virtio_net_->SetMmioDevice(virtio_mmio_net_.get());
 
     virtio_net_->SetTxCallback([this](const uint8_t* frame, uint32_t len) {
@@ -289,38 +254,44 @@ bool Vm::SetupVirtioNet(bool link_up, const std::vector<PortForward>& forwards) 
     });
 
     addr_space_.AddMmioDevice(
-        kVirtioNetMmioBase, VirtioMmioDevice::kMmioSize, virtio_mmio_net_.get());
+        slot.mmio_base, VirtioMmioDevice::kMmioSize, virtio_mmio_net_.get());
 
     if (!net_backend_->Start(virtio_net_.get(),
-                              [this]() { InjectIrq(kVirtioNetIrq); },
+                              [this, irq = slot.irq]() { InjectIrq(irq); },
                               forwards)) {
         LOG_ERROR("Failed to start network backend");
         return false;
     }
+    active_virtio_slots_.push_back(slot);
     return true;
 }
 
-bool Vm::SetupVirtioInput() {
+bool Vm::SetupVirtioInput(const VirtioDeviceSlot& kbd_slot,
+                          const VirtioDeviceSlot& tablet_slot) {
     virtio_kbd_ = std::make_unique<VirtioInputDevice>(VirtioInputDevice::SubType::kKeyboard);
     virtio_mmio_kbd_ = std::make_unique<VirtioMmioDevice>();
     virtio_mmio_kbd_->Init(virtio_kbd_.get(), mem_);
-    virtio_mmio_kbd_->SetIrqCallback([this]() { InjectIrq(kVirtioKbdIrq); });
+    virtio_mmio_kbd_->SetIrqCallback([this, irq = kbd_slot.irq]() { InjectIrq(irq); });
+    virtio_mmio_kbd_->SetIrqLevelCallback([this, irq = kbd_slot.irq](bool a) { SetIrqLevel(irq, a); });
     virtio_kbd_->SetMmioDevice(virtio_mmio_kbd_.get());
     addr_space_.AddMmioDevice(
-        kVirtioKbdMmioBase, VirtioMmioDevice::kMmioSize, virtio_mmio_kbd_.get());
+        kbd_slot.mmio_base, VirtioMmioDevice::kMmioSize, virtio_mmio_kbd_.get());
+    active_virtio_slots_.push_back(kbd_slot);
 
     virtio_tablet_ = std::make_unique<VirtioInputDevice>(VirtioInputDevice::SubType::kTablet);
     virtio_mmio_tablet_ = std::make_unique<VirtioMmioDevice>();
     virtio_mmio_tablet_->Init(virtio_tablet_.get(), mem_);
-    virtio_mmio_tablet_->SetIrqCallback([this]() { InjectIrq(kVirtioTabletIrq); });
+    virtio_mmio_tablet_->SetIrqCallback([this, irq = tablet_slot.irq]() { InjectIrq(irq); });
+    virtio_mmio_tablet_->SetIrqLevelCallback([this, irq = tablet_slot.irq](bool a) { SetIrqLevel(irq, a); });
     virtio_tablet_->SetMmioDevice(virtio_mmio_tablet_.get());
     addr_space_.AddMmioDevice(
-        kVirtioTabletMmioBase, VirtioMmioDevice::kMmioSize, virtio_mmio_tablet_.get());
+        tablet_slot.mmio_base, VirtioMmioDevice::kMmioSize, virtio_mmio_tablet_.get());
+    active_virtio_slots_.push_back(tablet_slot);
 
     return true;
 }
 
-bool Vm::SetupVirtioGpu(uint32_t width, uint32_t height) {
+bool Vm::SetupVirtioGpu(uint32_t width, uint32_t height, const VirtioDeviceSlot& slot) {
     virtio_gpu_ = std::make_unique<VirtioGpuDevice>(width, height);
     virtio_gpu_->SetMemMap(mem_);
 
@@ -331,23 +302,24 @@ bool Vm::SetupVirtioGpu(uint32_t width, uint32_t height) {
         virtio_gpu_->SetCursorCallback([this](const CursorInfo& cursor) {
             display_port_->SubmitCursor(cursor);
         });
-        virtio_gpu_->SetScanoutStateCallback([this](bool active, uint32_t width, uint32_t height) {
-            display_port_->SubmitScanoutState(active, width, height);
+        virtio_gpu_->SetScanoutStateCallback([this](bool active, uint32_t w, uint32_t h) {
+            display_port_->SubmitScanoutState(active, w, h);
         });
     }
 
     virtio_mmio_gpu_ = std::make_unique<VirtioMmioDevice>();
     virtio_mmio_gpu_->Init(virtio_gpu_.get(), mem_);
-    virtio_mmio_gpu_->SetIrqCallback([this]() { InjectIrq(kVirtioGpuIrq); });
+    virtio_mmio_gpu_->SetIrqCallback([this, irq = slot.irq]() { InjectIrq(irq); });
+    virtio_mmio_gpu_->SetIrqLevelCallback([this, irq = slot.irq](bool a) { SetIrqLevel(irq, a); });
     virtio_gpu_->SetMmioDevice(virtio_mmio_gpu_.get());
     addr_space_.AddMmioDevice(
-        kVirtioGpuMmioBase, VirtioMmioDevice::kMmioSize, virtio_mmio_gpu_.get());
+        slot.mmio_base, VirtioMmioDevice::kMmioSize, virtio_mmio_gpu_.get());
+    active_virtio_slots_.push_back(slot);
 
     return true;
 }
 
-bool Vm::SetupVirtioSerial() {
-    // 2 ports: port 0 = vdagent (clipboard), port 1 = QEMU Guest Agent
+bool Vm::SetupVirtioSerial(const VirtioDeviceSlot& slot) {
     virtio_serial_ = std::make_unique<VirtioSerialDevice>(2);
     virtio_serial_->SetPortName(0, "com.redhat.spice.0");
     virtio_serial_->SetPortName(1, "org.qemu.guest_agent.0");
@@ -381,38 +353,41 @@ bool Vm::SetupVirtioSerial() {
 
     virtio_mmio_serial_ = std::make_unique<VirtioMmioDevice>();
     virtio_mmio_serial_->Init(virtio_serial_.get(), mem_);
-    virtio_mmio_serial_->SetIrqCallback([this]() { InjectIrq(kVirtioSerialIrq); });
+    virtio_mmio_serial_->SetIrqCallback([this, irq = slot.irq]() { InjectIrq(irq); });
+    virtio_mmio_serial_->SetIrqLevelCallback([this, irq = slot.irq](bool a) { SetIrqLevel(irq, a); });
     virtio_serial_->SetMmioDevice(virtio_mmio_serial_.get());
     addr_space_.AddMmioDevice(
-        kVirtioSerialMmioBase, VirtioMmioDevice::kMmioSize, virtio_mmio_serial_.get());
+        slot.mmio_base, VirtioMmioDevice::kMmioSize, virtio_mmio_serial_.get());
+    active_virtio_slots_.push_back(slot);
 
     LOG_INFO("VirtIO Serial device initialized (vdagent + guest-agent)");
     return true;
 }
 
-bool Vm::SetupVirtioFs(const std::vector<VmSharedFolder>& initial_folders) {
-    // Create single virtiofs device with mount tag "shared"
+bool Vm::SetupVirtioFs(const std::vector<VmSharedFolder>& initial_folders,
+                       const VirtioDeviceSlot& slot) {
     virtio_fs_ = std::make_unique<VirtioFsDevice>("shared");
-    
+
     virtio_mmio_fs_ = std::make_unique<VirtioMmioDevice>();
     virtio_mmio_fs_->Init(virtio_fs_.get(), mem_);
-    virtio_mmio_fs_->SetIrqCallback([this]() { InjectIrq(kVirtioFsBaseIrq); });
+    virtio_mmio_fs_->SetIrqCallback([this, irq = slot.irq]() { InjectIrq(irq); });
+    virtio_mmio_fs_->SetIrqLevelCallback([this, irq = slot.irq](bool a) { SetIrqLevel(irq, a); });
     virtio_fs_->SetMmioDevice(virtio_mmio_fs_.get());
-    
-    addr_space_.AddMmioDevice(kVirtioFsMmioBase, VirtioMmioDevice::kMmioSize, virtio_mmio_fs_.get());
-    
-    // Add initial shares
+
+    addr_space_.AddMmioDevice(slot.mmio_base, VirtioMmioDevice::kMmioSize, virtio_mmio_fs_.get());
+    active_virtio_slots_.push_back(slot);
+
     for (const auto& folder : initial_folders) {
         if (!virtio_fs_->AddShare(folder.tag, folder.host_path, folder.readonly)) {
             LOG_WARN("Failed to add initial share: %s -> %s", folder.tag.c_str(), folder.host_path.c_str());
         }
     }
-    
+
     LOG_INFO("VirtIO FS device initialized (mount tag: shared, %zu initial shares)", initial_folders.size());
     return true;
 }
 
-bool Vm::SetupVirtioSnd() {
+bool Vm::SetupVirtioSnd(const VirtioDeviceSlot& slot) {
     virtio_snd_ = std::make_unique<VirtioSndDevice>();
     virtio_snd_->SetMemMap(mem_);
 
@@ -422,28 +397,14 @@ bool Vm::SetupVirtioSnd() {
 
     virtio_mmio_snd_ = std::make_unique<VirtioMmioDevice>();
     virtio_mmio_snd_->Init(virtio_snd_.get(), mem_);
-    virtio_mmio_snd_->SetIrqCallback([this]() { InjectIrq(kVirtioSndIrq); });
+    virtio_mmio_snd_->SetIrqCallback([this, irq = slot.irq]() { InjectIrq(irq); });
+    virtio_mmio_snd_->SetIrqLevelCallback([this, irq = slot.irq](bool a) { SetIrqLevel(irq, a); });
     virtio_snd_->SetMmioDevice(virtio_mmio_snd_.get());
     addr_space_.AddMmioDevice(
-        kVirtioSndMmioBase, VirtioMmioDevice::kMmioSize, virtio_mmio_snd_.get());
+        slot.mmio_base, VirtioMmioDevice::kMmioSize, virtio_mmio_snd_.get());
+    active_virtio_slots_.push_back(slot);
 
     LOG_INFO("VirtIO Sound device initialized (playback)");
-    return true;
-}
-
-bool Vm::LoadKernel(const VmConfig& config) {
-    x86::BootConfig boot_cfg;
-    boot_cfg.kernel_path = config.kernel_path;
-    boot_cfg.initrd_path = config.initrd_path;
-    boot_cfg.cmdline = config.cmdline;
-    boot_cfg.mem = mem_;
-    boot_cfg.cpu_count = config.cpu_count;
-    boot_cfg.virtio_devs = virtio_acpi_devs_;
-
-    uint64_t kernel_size = x86::LoadLinuxKernel(boot_cfg);
-    if (kernel_size == 0) {
-        return false;
-    }
     return true;
 }
 
@@ -452,37 +413,64 @@ void Vm::InputThreadFunc() {
 
     uint8_t buf[32]{};
     while (running_) {
-        size_t read = console_port_->Read(buf, sizeof(buf));
-        if (read == 0) {
+        size_t n = console_port_->Read(buf, sizeof(buf));
+        if (n == 0) {
             continue;
         }
-        for (size_t i = 0; i < read; ++i) {
-            uart_.PushInput(buf[i]);
-        }
-        uart_.CheckAndRaiseIrq();
+        machine_->InjectConsoleInput(buf, n);
     }
 }
 
-void Vm::InjectIrq(uint8_t irq) {
-    uint64_t rte = 0;
-    if (!ioapic_.GetRedirEntry(irq, &rte)) return;
-
-    bool masked = (rte >> 16) & 1;
-    if (masked) return;
-
-    uint32_t vector = rte & 0xFF;
-    if (vector == 0) return;
-
-    InterruptRequest req{};
-    req.vector = vector;
-    req.destination = static_cast<uint32_t>(rte >> 56);
-    req.logical_destination = ((rte >> 11) & 1) != 0;
-    req.level_triggered = ((rte >> 15) & 1) != 0;
-
-    hv_vm_->RequestInterrupt(req);
-}
-
 void Vm::VCpuThreadFunc(uint32_t vcpu_index) {
+#ifdef __APPLE__
+    auto created = hv_vm_->CreateVCpu(vcpu_index, &addr_space_);
+    if (!created) {
+        LOG_ERROR("vCPU %u: failed to create on thread", vcpu_index);
+        RequestStop();
+        return;
+    }
+    vcpus_[vcpu_index] = std::move(created);
+
+    // Set up PSCI callbacks
+    {
+        auto* hvf_vcpu = dynamic_cast<hvf::HvfVCpu*>(vcpus_[vcpu_index].get());
+        if (hvf_vcpu) {
+            hvf_vcpu->SetPsciCpuOnCallback([this](const hvf::PsciCpuOnRequest& req) -> int {
+                if (req.target_cpu >= cpu_count_) return -2;  // INVALID_PARAMETERS
+                auto& state = secondary_cpu_states_[req.target_cpu];
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (state->powered_on) return -4;  // ALREADY_ON
+                state->entry_addr = req.entry_addr;
+                state->context_id = req.context_id;
+                state->powered_on = true;
+                state->cv.notify_one();
+                return 0;  // SUCCESS
+            });
+            hvf_vcpu->SetPsciShutdownCallback([this]() {
+                RequestStop();
+            });
+        }
+    }
+
+    if (vcpu_index == 0) {
+        if (!machine_->SetupBootVCpu(vcpus_[0].get(), mem_.base)) {
+            LOG_ERROR("Failed to set initial vCPU registers");
+            RequestStop();
+            return;
+        }
+    } else {
+        // Secondary vCPU: wait for PSCI CPU_ON
+        auto& state = secondary_cpu_states_[vcpu_index];
+        std::unique_lock<std::mutex> lock(state->mutex);
+        state->cv.wait(lock, [&]() { return state->powered_on || !running_; });
+        if (!running_) return;
+
+        auto* hvf_vcpu = dynamic_cast<hvf::HvfVCpu*>(vcpus_[vcpu_index].get());
+        if (hvf_vcpu) {
+            hvf_vcpu->SetupSecondaryCpu(state->entry_addr, state->context_id);
+        }
+    }
+#endif
     auto& vcpu = vcpus_[vcpu_index];
     uint64_t exit_count = 0;
 
@@ -495,23 +483,26 @@ void Vm::VCpuThreadFunc(uint32_t vcpu_index) {
             break;
 
         case VCpuExitAction::kHalt:
-            SwitchToThread();
+            VmPlatform::YieldCpu();
             break;
 
         case VCpuExitAction::kShutdown:
-            LOG_INFO("vCPU %u: shutdown (after %llu exits)", vcpu_index, exit_count);
+            LOG_INFO("vCPU %u: shutdown (after %llu exits)",
+                     vcpu_index, (unsigned long long)exit_count);
             RequestStop();
             return;
 
         case VCpuExitAction::kError:
-            LOG_ERROR("vCPU %u: error (after %llu exits)", vcpu_index, exit_count);
+            LOG_ERROR("vCPU %u: error (after %llu exits)",
+                      vcpu_index, (unsigned long long)exit_count);
             exit_code_.store(1);
             RequestStop();
             return;
         }
     }
 
-    LOG_INFO("vCPU %u stopped (total exits: %llu)", vcpu_index, exit_count);
+    LOG_INFO("vCPU %u stopped (total exits: %llu)",
+             vcpu_index, (unsigned long long)exit_count);
 }
 
 void Vm::HidInputThreadFunc() {
@@ -524,8 +515,8 @@ void Vm::HidInputThreadFunc() {
         while (input_port_->PollKeyboard(&kev)) {
             if (virtio_kbd_) {
                 virtio_kbd_->InjectEvent(EV_KEY, static_cast<uint16_t>(kev.key_code),
-                                         kev.pressed ? 1 : 0, /*notify=*/false);
-                virtio_kbd_->InjectEvent(EV_SYN, SYN_REPORT, 0, /*notify=*/true);
+                                         kev.pressed ? 1 : 0, false);
+                virtio_kbd_->InjectEvent(EV_SYN, SYN_REPORT, 0, true);
             }
         }
 
@@ -533,28 +524,27 @@ void Vm::HidInputThreadFunc() {
         while (input_port_->PollPointer(&pev)) {
             if (virtio_tablet_) {
                 virtio_tablet_->InjectEvent(EV_ABS, ABS_X,
-                    static_cast<uint32_t>(pev.x), /*notify=*/false);
+                    static_cast<uint32_t>(pev.x), false);
                 virtio_tablet_->InjectEvent(EV_ABS, ABS_Y,
-                    static_cast<uint32_t>(pev.y), /*notify=*/false);
+                    static_cast<uint32_t>(pev.y), false);
 
                 uint32_t btns = pev.buttons;
                 if ((btns & 1) != (prev_buttons & 1))
                     virtio_tablet_->InjectEvent(EV_KEY, BTN_LEFT,
-                        (btns & 1) ? 1 : 0, /*notify=*/false);
+                        (btns & 1) ? 1 : 0, false);
                 if ((btns & 2) != (prev_buttons & 2))
                     virtio_tablet_->InjectEvent(EV_KEY, BTN_RIGHT,
-                        (btns & 2) ? 1 : 0, /*notify=*/false);
+                        (btns & 2) ? 1 : 0, false);
                 if ((btns & 4) != (prev_buttons & 4))
                     virtio_tablet_->InjectEvent(EV_KEY, BTN_MIDDLE,
-                        (btns & 4) ? 1 : 0, /*notify=*/false);
+                        (btns & 4) ? 1 : 0, false);
                 prev_buttons = btns;
 
-                virtio_tablet_->InjectEvent(EV_SYN, SYN_REPORT, 0,
-                                            /*notify=*/true);
+                virtio_tablet_->InjectEvent(EV_SYN, SYN_REPORT, 0, true);
             }
         }
 
-        Sleep(2);
+        VmPlatform::SleepMs(2);
     }
 }
 
@@ -583,8 +573,15 @@ int Vm::Run() {
 
 void Vm::RequestStop() {
     running_ = false;
+    // Wake any secondary vCPUs waiting for PSCI CPU_ON
+    for (auto& state : secondary_cpu_states_) {
+        if (state) {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->cv.notify_all();
+        }
+    }
     for (auto& vcpu : vcpus_) {
-        vcpu->CancelRun();
+        if (vcpu) vcpu->CancelRun();
     }
 }
 
@@ -595,15 +592,11 @@ void Vm::RequestReboot() {
 }
 
 void Vm::TriggerPowerButton() {
-    acpi_pm_.TriggerPowerButton();
+    machine_->TriggerPowerButton();
 }
 
 void Vm::InjectConsoleBytes(const uint8_t* data, size_t size) {
-    if (!data || size == 0) return;
-    for (size_t i = 0; i < size; ++i) {
-        uart_.PushInput(data[i]);
-    }
-    uart_.CheckAndRaiseIrq();
+    machine_->InjectConsoleInput(data, size);
 }
 
 void Vm::SetNetLinkUp(bool up) {
@@ -619,36 +612,36 @@ std::vector<uint16_t> Vm::UpdatePortForwards(const std::vector<PortForward>& for
 void Vm::InjectKeyEvent(uint32_t evdev_code, bool pressed) {
     if (virtio_kbd_) {
         virtio_kbd_->InjectEvent(EV_KEY, static_cast<uint16_t>(evdev_code),
-                                 pressed ? 1 : 0, /*notify=*/false);
-        virtio_kbd_->InjectEvent(EV_SYN, SYN_REPORT, 0, /*notify=*/true);
+                                 pressed ? 1 : 0, false);
+        virtio_kbd_->InjectEvent(EV_SYN, SYN_REPORT, 0, true);
     }
 }
 
 void Vm::InjectPointerEvent(int32_t x, int32_t y, uint32_t buttons) {
     if (virtio_tablet_) {
         virtio_tablet_->InjectEvent(EV_ABS, ABS_X,
-            static_cast<uint32_t>(x), /*notify=*/false);
+            static_cast<uint32_t>(x), false);
         virtio_tablet_->InjectEvent(EV_ABS, ABS_Y,
-            static_cast<uint32_t>(y), /*notify=*/false);
+            static_cast<uint32_t>(y), false);
         if ((buttons & 1) != (inject_prev_buttons_ & 1))
             virtio_tablet_->InjectEvent(EV_KEY, BTN_LEFT,
-                (buttons & 1) ? 1 : 0, /*notify=*/false);
+                (buttons & 1) ? 1 : 0, false);
         if ((buttons & 2) != (inject_prev_buttons_ & 2))
             virtio_tablet_->InjectEvent(EV_KEY, BTN_RIGHT,
-                (buttons & 2) ? 1 : 0, /*notify=*/false);
+                (buttons & 2) ? 1 : 0, false);
         if ((buttons & 4) != (inject_prev_buttons_ & 4))
             virtio_tablet_->InjectEvent(EV_KEY, BTN_MIDDLE,
-                (buttons & 4) ? 1 : 0, /*notify=*/false);
+                (buttons & 4) ? 1 : 0, false);
         inject_prev_buttons_ = buttons;
-        virtio_tablet_->InjectEvent(EV_SYN, SYN_REPORT, 0, /*notify=*/true);
+        virtio_tablet_->InjectEvent(EV_SYN, SYN_REPORT, 0, true);
     }
 }
 
 void Vm::InjectWheelEvent(int32_t delta) {
     if (virtio_tablet_ && delta != 0) {
         virtio_tablet_->InjectEvent(EV_REL, REL_WHEEL,
-            static_cast<uint32_t>(delta), /*notify=*/false);
-        virtio_tablet_->InjectEvent(EV_SYN, SYN_REPORT, 0, /*notify=*/true);
+            static_cast<uint32_t>(delta), false);
+        virtio_tablet_->InjectEvent(EV_SYN, SYN_REPORT, 0, true);
     }
 }
 
