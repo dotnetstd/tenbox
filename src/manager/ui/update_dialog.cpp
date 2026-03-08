@@ -44,6 +44,7 @@ static INT_PTR CALLBACK UpdateDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) 
     case WM_INITDIALOG: {
         data = reinterpret_cast<UpdateDlgData*>(lp);
         SetWindowLongPtrW(dlg, DWLP_USER, reinterpret_cast<LONG_PTR>(data));
+        CenterDialogToParent(dlg);
 
         RECT rc;
         GetClientRect(dlg, &rc);
@@ -150,7 +151,7 @@ static void ShowDownloadDialog(HWND parent, UpdateDlgData& data) {
     DlgBuilder b;
     int W = 220, H = 70;
     b.Begin(i18n::tr(S::kUpdateDownloading), 0, 0, W, H,
-        WS_POPUP | WS_CAPTION | DS_CENTER | DS_SETFONT);
+        WS_POPUP | WS_CAPTION | DS_SETFONT);
 
     b.AddStatic(IDC_UP_STATUS, "", 0, 0, 0, 0);
     b.AddButton(IDC_UP_CANCEL, i18n::tr(S::kDlgBtnCancel), 0, 0, 48, 14);

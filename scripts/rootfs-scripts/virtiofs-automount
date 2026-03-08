@@ -3,7 +3,7 @@
 
 MOUNT_TAG="shared"
 MOUNT_POINT="/mnt/shared"
-MOUNT_USER="terrence"
+MOUNT_USER="tenbox"
 USER_HOME="/home/$MOUNT_USER"
 DESKTOP_DIR="$USER_HOME/Desktop"
 

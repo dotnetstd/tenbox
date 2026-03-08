@@ -198,6 +198,8 @@ static const std::unordered_map<S, const char*> kStringsEn = {
         "2. Enable hardware virtualization in BIOS/UEFI settings\n"
         "   - Intel CPU: Enable VT-x (Intel Virtualization Technology)\n"
         "   - AMD CPU: Enable SVM Mode\n"
+        "   Tip: Open Task Manager > Performance tab to check if\n"
+        "   \"Virtualization\" shows as \"Enabled\".\n"
         "3. Run as Administrator in PowerShell:\n"
         "   bcdedit /set hypervisorlaunchtype auto\n"
         "4. Restart your computer"},
@@ -394,6 +396,7 @@ static const std::unordered_map<S, const char*> kStringsZhCN = {
         "2. 在 BIOS/UEFI 中开启 CPU 硬件虚拟化\n"
         "   · Intel CPU：开启 VT-x（Intel Virtualization Technology）\n"
         "   · AMD CPU：开启 SVM Mode\n"
+        "   提示：可打开任务管理器 → 性能页面，查看\"虚拟化\"是否显示为\"已启用\"。\n"
         "3. 以管理员身份运行 PowerShell，执行：\n"
         "   bcdedit /set hypervisorlaunchtype auto\n"
         "4. 重启计算机"},

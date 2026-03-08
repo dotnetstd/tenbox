@@ -227,6 +227,20 @@ inline std::string FindShareFile(const std::string& exe_dir, const char* filenam
     return {};
 }
 
+// Center a dialog window over its parent (or owner) instead of the screen.
+inline void CenterDialogToParent(HWND dlg) {
+    HWND parent = GetParent(dlg);
+    if (!parent) parent = GetWindow(dlg, GW_OWNER);
+    if (!parent) return;
+    RECT pr, dr;
+    GetWindowRect(parent, &pr);
+    GetWindowRect(dlg, &dr);
+    int dw = dr.right - dr.left, dh = dr.bottom - dr.top;
+    int x = pr.left + ((pr.right - pr.left) - dw) / 2;
+    int y = pr.top + ((pr.bottom - pr.top) - dh) / 2;
+    SetWindowPos(dlg, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 // In-memory dialog template builder.
 // Builds a DLGTEMPLATE + items in a flat buffer, properly aligned.
 class DlgBuilder {

@@ -2,7 +2,11 @@ set(TENBOX_IPC_SOURCES
     ${CMAKE_SOURCE_DIR}/src/ipc/protocol_v1.cpp
 )
 
-if(NOT WIN32)
+if(WIN32)
+    list(APPEND TENBOX_IPC_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/platform/windows/ipc/shared_framebuffer_win32.cpp
+    )
+else()
     list(APPEND TENBOX_IPC_SOURCES
         ${CMAKE_SOURCE_DIR}/src/ipc/unix_socket.cpp
         ${CMAKE_SOURCE_DIR}/src/ipc/shared_framebuffer_posix.cpp

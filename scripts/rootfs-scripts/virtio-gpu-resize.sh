@@ -5,8 +5,8 @@ sleep 0.1
 export DISPLAY=:0
 
 # Try to find valid XAUTHORITY
-TERRENCE_UID=$(id -u terrence 2>/dev/null || echo 1000)
-for auth in /home/terrence/.Xauthority /var/run/lightdm/terrence/:0 /run/user/${TERRENCE_UID}/gdm/Xauthority; do
+TENBOX_UID=$(id -u tenbox 2>/dev/null || echo 1000)
+for auth in /home/tenbox/.Xauthority /var/run/lightdm/tenbox/:0 /run/user/${TENBOX_UID}/gdm/Xauthority; do
     if [ -f "$auth" ]; then
         export XAUTHORITY="$auth"
         break

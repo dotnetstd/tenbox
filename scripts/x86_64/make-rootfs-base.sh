@@ -18,11 +18,11 @@ set -e
 
 ROOTFS_SIZE="20G"
 SUITE="bookworm"
-MIRROR="https://mirrors.ustc.edu.cn/debian"
-MIRROR_SECURITY="https://mirrors.ustc.edu.cn/debian-security"
+MIRROR="http://deb.debian.org/debian"
+MIRROR_SECURITY="http://deb.debian.org/debian-security"
 ROOT_PASSWORD="${ROOT_PASSWORD:-tenbox}"
-USER_NAME="${USER_NAME:-terrence}"
-USER_PASSWORD="${USER_PASSWORD:-terrence}"
+USER_NAME="${USER_NAME:-tenbox}"
+USER_PASSWORD="${USER_PASSWORD:-tenbox}"
 INCLUDE_PKGS="systemd-sysv,udev,dbus,sudo,\
 iproute2,iputils-ping,ifupdown,isc-dhcp-client,\
 ca-certificates,curl,wget,\
@@ -35,8 +35,7 @@ kmod,pciutils,usbutils,\
 coreutils,findutils,grep,gawk,sed,tar,gzip,bzip2,xz-utils"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/../../build"
-mkdir -p "$BUILD_DIR"
+BUILD_DIR="$(mkdir -p "$SCRIPT_DIR/../../build" && cd "$SCRIPT_DIR/../../build" && pwd)"
 
 # Cache directories
 CACHE_DIR="$BUILD_DIR/.rootfs-cache"
@@ -45,7 +44,7 @@ APT_CACHE_DIR="$CACHE_DIR/apt-archives"
 mkdir -p "$CHECKPOINT_DIR" "$APT_CACHE_DIR"
 
 # Cache files
-CACHE_TAR="$CACHE_DIR/debootstrap-${SUITE}-base.tar"
+CACHE_TAR="$(realpath -m "$CACHE_DIR/debootstrap-${SUITE}-base.tar")"
 
 # Work dir must be on WSL Linux FS (/tmp), not NTFS (DrvFS /mnt/*) - loop devices need mknod
 WORK_DIR="${TENBOX_WORK_DIR:-/tmp/tenbox-rootfs-base}"
@@ -293,8 +292,14 @@ do_debootstrap() {
     
     if [ -f "$CACHE_TAR" ]; then
         echo "  Using cached tarball: $CACHE_TAR"
-        sudo debootstrap --include="$INCLUDE_PKGS" \
-            --unpack-tarball="$CACHE_TAR" "$SUITE" "$MOUNT_DIR" "$MIRROR"
+        if ! sudo debootstrap --include="$INCLUDE_PKGS" \
+            --unpack-tarball="$CACHE_TAR" "$SUITE" "$MOUNT_DIR" "$MIRROR"; then
+            echo "  Cache tarball failed, removing stale cache and cleaning mount dir..."
+            rm -f "$CACHE_TAR"
+            sudo rm -rf "${MOUNT_DIR:?}"/*
+            sudo debootstrap --include="$INCLUDE_PKGS" \
+                "$SUITE" "$MOUNT_DIR" "$MIRROR"
+        fi
     else
         echo "  No cache found, downloading packages (first run)..."
         sudo debootstrap --include="$INCLUDE_PKGS" \
@@ -332,6 +337,7 @@ PRC
     # Copy rootfs helper scripts and services
     sudo cp -r "$SCRIPT_DIR/../rootfs-scripts" "$MOUNT_DIR/tmp/"
     sudo cp -r "$SCRIPT_DIR/../rootfs-services" "$MOUNT_DIR/tmp/"
+    sudo cp -r "$SCRIPT_DIR/../rootfs-configs" "$MOUNT_DIR/tmp/"
 }
 
 do_config_basic() {
@@ -542,7 +548,7 @@ if [ -f /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf ]; then
 fi
 
 mkdir -p /etc/polkit-1/rules.d
-cp /tmp/rootfs-services/50-terrence-power.rules /etc/polkit-1/rules.d/
+cp /tmp/rootfs-services/50-user-power.rules /etc/polkit-1/rules.d/
 
 mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
 cp /tmp/rootfs-services/serial-getty-autologin.conf /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
@@ -681,7 +687,7 @@ rm -rf /var/log/*.log /var/log/apt/* /var/log/dpkg.log
 EOF
     
     sudo rm -f "$MOUNT_DIR/usr/sbin/policy-rc.d"
-    sudo rm -rf "$MOUNT_DIR/tmp/rootfs-scripts" "$MOUNT_DIR/tmp/rootfs-services"
+    sudo rm -rf "$MOUNT_DIR/tmp/rootfs-scripts" "$MOUNT_DIR/tmp/rootfs-services" "$MOUNT_DIR/tmp/rootfs-configs"
     sudo rm -f "$MOUNT_DIR/etc/resolv.conf"
     
     # Unmount apt cache

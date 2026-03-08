@@ -243,8 +243,14 @@ chmod +x "$WORKDIR/initramfs/init"
 
 echo "[4/5] Packing initramfs..."
 cd "$WORKDIR/initramfs"
-find . | cpio -o -H newc 2>/dev/null | gzip > "$WORKDIR/initramfs.cpio.gz"
+find . | cpio -o -H newc --quiet | gzip -9 > "$WORKDIR/initramfs.cpio.gz"
+
+PACKED_SIZE=$(stat -c '%s' "$WORKDIR/initramfs.cpio.gz" 2>/dev/null || stat -f '%z' "$WORKDIR/initramfs.cpio.gz")
+if [ "$PACKED_SIZE" -le 20 ]; then
+    echo "Error: initramfs.cpio.gz is too small (${PACKED_SIZE} bytes), packing likely failed." >&2
+    exit 1
+fi
 
 echo "[5/5] Copying output..."
 cp "$WORKDIR/initramfs.cpio.gz" "$OUTDIR/initramfs.cpio.gz"
-echo "Done: $OUTDIR/initramfs.cpio.gz ($(du -h "$OUTDIR/initramfs.cpio.gz" | cut -f1))"
+echo "Done: $OUTDIR/initramfs.cpio.gz ($(ls -lh "$OUTDIR/initramfs.cpio.gz" | awk '{print $5}'))"

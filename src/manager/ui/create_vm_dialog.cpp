@@ -129,16 +129,17 @@ struct DialogData {
     }
 };
 
-static std::string NextAgentName(const std::vector<VmRecord>& records) {
+static std::string NextAgentName(const std::vector<VmRecord>& records, const std::string& image_id) {
+    std::string prefix = image_id + "-";
     int max_n = 0;
     for (const auto& rec : records) {
         const auto& name = rec.spec.name;
-        if (name.size() > 6 && name.substr(0, 6) == "Agent_") {
-            try { max_n = std::max(max_n, std::stoi(name.substr(6))); }
+        if (name.size() > prefix.size() && name.substr(0, prefix.size()) == prefix) {
+            try { max_n = std::max(max_n, std::stoi(name.substr(prefix.size()))); }
             catch (...) {}
         }
     }
-    return "Agent_" + std::to_string(max_n + 1);
+    return prefix + std::to_string(max_n + 1);
 }
 
 static std::string FormatSize(uint64_t bytes) {
@@ -266,7 +267,7 @@ static void ShowPage(DialogData* data, Page page) {
         SetWindowTextW(btn_back, i18n::tr_w(i18n::S::kImgBtnBack).c_str());
 
         auto records = data->mgr->ListVms();
-        SetDlgItemTextW(dlg, IDC_NAME_EDIT, i18n::to_wide(NextAgentName(records)).c_str());
+        SetDlgItemTextW(dlg, IDC_NAME_EDIT, i18n::to_wide(NextAgentName(records, data->selected_image.id)).c_str());
 
         int max_mem = g_host_memory_gb > 0 ? g_host_memory_gb : 16;
         InitSlider(dlg, IDC_MEMORY_SLIDER, IDC_MEMORY_VALUE, 1, max_mem, kDefaultMemoryGb, true);

@@ -144,6 +144,7 @@ private:
     // Shared-memory framebuffer for zero-copy frame transport.
     ipc::SharedFramebuffer shm_fb_;
     uint64_t shm_frame_seq_ = 0;
+    uint32_t shm_generation_ = 0;
     bool shm_init_sent_ = false;
 
     // Legacy frame queue (fallback when shm is unavailable).

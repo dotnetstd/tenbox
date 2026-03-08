@@ -114,6 +114,19 @@ private:
     }
 };
 
+static void CenterDialogToParent(HWND dlg) {
+    HWND parent = GetParent(dlg);
+    if (!parent) parent = GetWindow(dlg, GW_OWNER);
+    if (!parent) return;
+    RECT pr, dr;
+    GetWindowRect(parent, &pr);
+    GetWindowRect(dlg, &dr);
+    int dw = dr.right - dr.left, dh = dr.bottom - dr.top;
+    int x = pr.left + ((pr.right - pr.left) - dw) / 2;
+    int y = pr.top + ((pr.bottom - pr.top) - dh) / 2;
+    SetWindowPos(dlg, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 enum PfDlgId {
     IDC_PF_LIST   = 300,
     IDC_PF_ADD    = 301,
@@ -140,20 +153,14 @@ static void PfRefreshList(PfDlgData* data) {
     auto forwards = data->mgr->GetPortForwards(data->vm_id);
     for (size_t i = 0; i < forwards.size(); ++i) {
         const auto& pf = forwards[i];
-        wchar_t buf[32];
-        swprintf_s(buf, L"%u", pf.host_port);
+        wchar_t buf[80];
+        swprintf_s(buf, L"127.0.0.1:%u (Host)  \u2192  127.0.0.1:%u (Guest)", pf.host_port, pf.guest_port);
 
         LVITEMW item{};
         item.mask = LVIF_TEXT;
         item.iItem = static_cast<int>(i);
         item.pszText = buf;
-        int idx = static_cast<int>(SendMessageW(lv, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
-
-        swprintf_s(buf, L"%u", pf.guest_port);
-        LVITEMW setitem{};
-        setitem.iSubItem = 1;
-        setitem.pszText = buf;
-        SendMessageW(lv, LVM_SETITEMTEXTW, idx, reinterpret_cast<LPARAM>(&setitem));
+        SendMessageW(lv, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item));
     }
 }
 
@@ -175,6 +182,7 @@ static INT_PTR CALLBACK AddPfDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_INITDIALOG:
         data = reinterpret_cast<AddPfDlgData*>(lp);
         SetWindowLongPtrW(dlg, DWLP_USER, reinterpret_cast<LONG_PTR>(data));
+        CenterDialogToParent(dlg);
         return TRUE;
 
     case WM_COMMAND:
@@ -225,7 +233,7 @@ static bool ShowAddPortForwardDialog(HWND parent, ManagerService& mgr, const std
     DlgBuilder b;
     int W = 180, H = 90;
     b.Begin(i18n::tr(S::kPfAddTitle), 0, 0, W, H,
-        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER | DS_SETFONT);
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_SETFONT);
 
     int lx = 8, lw = 60, ex = 72, ew = 60, y = 10, rh = 14, sp = 18;
 
@@ -237,10 +245,9 @@ static bool ShowAddPortForwardDialog(HWND parent, ManagerService& mgr, const std
     b.AddEdit(IDC_APF_GUEST_PORT, ex, y - 2, ew, rh, ES_NUMBER);
     y += sp + 8;
 
-    int btn_w = 50, btn_h = 14, btn_gap = 8;
-    int btn_x = W - btn_w * 2 - btn_gap - 8;
+    int btn_w = 50, btn_h = 14;
+    int btn_x = W - btn_w - 8;
     b.AddDefButton(IDOK, i18n::tr(S::kDlgBtnSave), btn_x, y, btn_w, btn_h);
-    b.AddButton(IDCANCEL, i18n::tr(S::kDlgBtnCancel), btn_x + btn_w + btn_gap, y, btn_w, btn_h);
 
     AddPfDlgData data{&mgr, vm_id, false};
     DialogBoxIndirectParamW(GetModuleHandle(nullptr), b.Build(), parent,
@@ -255,6 +262,7 @@ static INT_PTR CALLBACK PfDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_INITDIALOG: {
         data = reinterpret_cast<PfDlgData*>(lp);
         SetWindowLongPtrW(dlg, DWLP_USER, reinterpret_cast<LONG_PTR>(data));
+        CenterDialogToParent(dlg);
 
         RECT rc;
         GetClientRect(dlg, &rc);
@@ -273,15 +281,12 @@ static INT_PTR CALLBACK PfDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         ListView_SetExtendedListViewStyle(lv,
             LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
-        std::wstring col_host = i18n::tr_w(i18n::S::kPfColHostPort);
-        std::wstring col_guest = i18n::tr_w(i18n::S::kPfColGuestPort);
+        std::wstring col_title = i18n::tr_w(i18n::S::kDlgPortForwards);
         LVCOLUMNW col{};
         col.mask = LVCF_TEXT | LVCF_WIDTH;
-        col.cx = (list_w - 4) / 2;
-        col.pszText = col_host.data();
+        col.cx = list_w - 4;
+        col.pszText = col_title.data();
         SendMessageW(lv, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&col));
-        col.pszText = col_guest.data();
-        SendMessageW(lv, LVM_INSERTCOLUMNW, 1, reinterpret_cast<LPARAM>(&col));
 
         data->listview = lv;
 
@@ -315,15 +320,12 @@ static INT_PTR CALLBACK PfDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_PF_OPEN: {
             int sel = ListView_GetNextItem(data->listview, -1, LVNI_SELECTED);
             if (sel >= 0) {
-                wchar_t port_buf[16]{};
-                LVITEMW lvi{};
-                lvi.iSubItem = 0;
-                lvi.pszText = port_buf;
-                lvi.cchTextMax = static_cast<int>(std::size(port_buf));
-                SendMessageW(data->listview, LVM_GETITEMTEXTW, sel, reinterpret_cast<LPARAM>(&lvi));
-                wchar_t url[64];
-                swprintf_s(url, L"http://localhost:%s", port_buf);
-                ShellExecuteW(dlg, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+                auto forwards = data->mgr->GetPortForwards(data->vm_id);
+                if (sel < static_cast<int>(forwards.size())) {
+                    wchar_t url[64];
+                    swprintf_s(url, L"http://127.0.0.1:%u", forwards[sel].host_port);
+                    ShellExecuteW(dlg, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+                }
             }
             return TRUE;
         }
@@ -336,19 +338,12 @@ static INT_PTR CALLBACK PfDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
                 return TRUE;
             }
 
-            wchar_t host_buf[16]{}, guest_buf[16]{};
-            LVITEMW lvi_get{};
-            lvi_get.iSubItem = 0;
-            lvi_get.pszText = host_buf;
-            lvi_get.cchTextMax = static_cast<int>(std::size(host_buf));
-            SendMessageW(data->listview, LVM_GETITEMTEXTW, sel, reinterpret_cast<LPARAM>(&lvi_get));
-            lvi_get.iSubItem = 1;
-            lvi_get.pszText = guest_buf;
-            lvi_get.cchTextMax = static_cast<int>(std::size(guest_buf));
-            SendMessageW(data->listview, LVM_GETITEMTEXTW, sel, reinterpret_cast<LPARAM>(&lvi_get));
+            auto forwards = data->mgr->GetPortForwards(data->vm_id);
+            if (sel >= static_cast<int>(forwards.size()))
+                return TRUE;
 
-            uint16_t host_port = static_cast<uint16_t>(_wtoi(host_buf));
-            uint16_t guest_port = static_cast<uint16_t>(_wtoi(guest_buf));
+            uint16_t host_port = forwards[sel].host_port;
+            uint16_t guest_port = forwards[sel].guest_port;
 
             std::string prompt = i18n::fmt(i18n::S::kPfConfirmRemoveMsg, host_port, guest_port);
 
@@ -383,7 +378,7 @@ void ShowPortForwardsDialog(HWND parent, ManagerService& mgr, const std::string&
     DlgBuilder b;
     int W = 300, H = 180;
     b.Begin(i18n::tr(S::kDlgPortForwards), 0, 0, W, H,
-        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER | DS_SETFONT);
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_SETFONT);
 
     int btn_h = 14, btn_w = 50;
     b.AddButton(IDC_PF_ADD, i18n::tr(S::kPfBtnAdd), 0, 0, btn_w, btn_h);

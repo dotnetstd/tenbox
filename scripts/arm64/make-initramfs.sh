@@ -245,6 +245,12 @@ python3 "$SCRIPT_DIR/../mkcpio.py" . "$WORKDIR/initramfs-arm64.cpio.gz" \
     dev/null,0666,1,3 \
     dev/ttyAMA0,0660,204,64
 
+PACKED_SIZE=$(stat -c '%s' "$WORKDIR/initramfs-arm64.cpio.gz" 2>/dev/null || stat -f '%z' "$WORKDIR/initramfs-arm64.cpio.gz")
+if [ "$PACKED_SIZE" -le 20 ]; then
+    echo "Error: initramfs-arm64.cpio.gz is too small (${PACKED_SIZE} bytes), packing likely failed." >&2
+    exit 1
+fi
+
 echo "[5/5] Copying output..."
 cp "$WORKDIR/initramfs-arm64.cpio.gz" "$OUTDIR/initramfs-arm64.cpio.gz"
-echo "Done: $OUTDIR/initramfs-arm64.cpio.gz ($(du -h "$OUTDIR/initramfs-arm64.cpio.gz" | cut -f1))"
+echo "Done: $OUTDIR/initramfs-arm64.cpio.gz ($(ls -lh "$OUTDIR/initramfs-arm64.cpio.gz" | awk '{print $5}'))"

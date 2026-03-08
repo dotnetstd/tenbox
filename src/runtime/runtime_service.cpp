@@ -216,11 +216,16 @@ RuntimeControlService::RuntimeControlService(std::string vm_id, std::string pipe
         uint32_t resH = frame.resource_height ? frame.resource_height : frame.height;
 
         // Create or resize shared framebuffer when resource dimensions change.
+        // Each resize uses a unique name (generation suffix) so the Manager
+        // can open the new mapping without conflicting with the old one that
+        // may still be mapped on its side.
         if (!shm_fb_.IsValid() || shm_fb_.width() != resW || shm_fb_.height() != resH) {
-            std::string shm_name = ipc::GetSharedFramebufferName(vm_id_);
             if (shm_fb_.IsValid()) {
                 shm_fb_.Close();
             }
+            ++shm_generation_;
+            std::string shm_name = ipc::GetSharedFramebufferName(vm_id_)
+                                   + "_" + std::to_string(shm_generation_);
             if (!shm_fb_.Create(shm_name, resW, resH)) {
                 LOG_ERROR("RuntimeService: failed to create shared framebuffer %ux%u", resW, resH);
                 return;

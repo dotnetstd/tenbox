@@ -49,6 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xz-utils \
     zstd \
     gzip \
+    cpio \
     python3 \
     coreutils \
     binutils \

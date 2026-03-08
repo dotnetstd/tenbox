@@ -23,8 +23,8 @@ SUITE="bookworm"
 MIRROR="https://mirrors.ustc.edu.cn/debian"
 MIRROR_SECURITY="https://mirrors.ustc.edu.cn/debian-security"
 ROOT_PASSWORD="${ROOT_PASSWORD:-tenbox}"
-USER_NAME="${USER_NAME:-terrence}"
-USER_PASSWORD="${USER_PASSWORD:-terrence}"
+USER_NAME="${USER_NAME:-tenbox}"
+USER_PASSWORD="${USER_PASSWORD:-tenbox}"
 INCLUDE_PKGS="systemd-sysv,udev,dbus,sudo,\
 iproute2,iputils-ping,ifupdown,isc-dhcp-client,\
 ca-certificates,curl,wget,\
@@ -412,6 +412,7 @@ PRC
     # Copy rootfs helper scripts and services
     sudo cp -r "$SCRIPT_DIR/rootfs-scripts" "$MOUNT_DIR/tmp/"
     sudo cp -r "$SCRIPT_DIR/rootfs-services" "$MOUNT_DIR/tmp/"
+    sudo cp -r "$SCRIPT_DIR/rootfs-configs" "$MOUNT_DIR/tmp/"
 }
 
 do_config_basic() {
@@ -616,7 +617,7 @@ if [ -f /etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf ]; the
 fi
 
 mkdir -p /etc/polkit-1/rules.d
-cp /tmp/rootfs-services/50-terrence-power.rules /etc/polkit-1/rules.d/
+cp /tmp/rootfs-services/50-user-power.rules /etc/polkit-1/rules.d/
 
 # ARM64 uses ttyAMA0 (PL011 UART) instead of ttyS0
 mkdir -p /etc/systemd/system/serial-getty@ttyAMA0.service.d
@@ -766,7 +767,7 @@ rm -rf /var/log/*.log /var/log/apt/* /var/log/dpkg.log
 EOF
     
     sudo rm -f "$MOUNT_DIR/usr/sbin/policy-rc.d"
-    sudo rm -rf "$MOUNT_DIR/tmp/rootfs-scripts" "$MOUNT_DIR/tmp/rootfs-services"
+    sudo rm -rf "$MOUNT_DIR/tmp/rootfs-scripts" "$MOUNT_DIR/tmp/rootfs-services" "$MOUNT_DIR/tmp/rootfs-configs"
     sudo rm -f "$MOUNT_DIR/etc/resolv.conf"
 
     # Remove qemu-aarch64-static from rootfs (only needed during build)

@@ -18,11 +18,11 @@ set -e
 
 ROOTFS_SIZE="20G"
 SUITE="bookworm"
-MIRROR="https://mirrors.ustc.edu.cn/debian"
-MIRROR_SECURITY="https://mirrors.ustc.edu.cn/debian-security"
+MIRROR="http://deb.debian.org/debian"
+MIRROR_SECURITY="http://deb.debian.org/debian-security"
 ROOT_PASSWORD="${ROOT_PASSWORD:-tenbox}"
-USER_NAME="${USER_NAME:-terrence}"
-USER_PASSWORD="${USER_PASSWORD:-terrence}"
+USER_NAME="${USER_NAME:-tenbox}"
+USER_PASSWORD="${USER_PASSWORD:-tenbox}"
 INCLUDE_PKGS="systemd-sysv,udev,dbus,sudo,\
 iproute2,iputils-ping,ifupdown,isc-dhcp-client,\
 ca-certificates,curl,wget,\
@@ -35,8 +35,7 @@ kmod,pciutils,usbutils,\
 coreutils,findutils,grep,gawk,sed,tar,gzip,bzip2,xz-utils"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/../../build"
-mkdir -p "$BUILD_DIR"
+BUILD_DIR="$(mkdir -p "$SCRIPT_DIR/../../build" && cd "$SCRIPT_DIR/../../build" && pwd)"
 
 # Cache directories
 CACHE_DIR="$BUILD_DIR/.rootfs-cache"
@@ -46,7 +45,7 @@ SCRIPTS_CACHE_DIR="$CACHE_DIR/scripts"
 mkdir -p "$CHECKPOINT_DIR" "$APT_CACHE_DIR" "$SCRIPTS_CACHE_DIR"
 
 # Cache files
-CACHE_TAR="$CACHE_DIR/debootstrap-${SUITE}-base.tar"
+CACHE_TAR="$(realpath -m "$CACHE_DIR/debootstrap-${SUITE}-base.tar")"
 CACHE_NODESOURCE="$SCRIPTS_CACHE_DIR/nodesource_setup_22.x.sh"
 CACHE_OPENCLAW="$SCRIPTS_CACHE_DIR/openclaw_install.sh"
 
@@ -136,6 +135,7 @@ STEPS=(
     "install_nodejs"
     "install_openclaw"
     "config_openclaw"
+    "copy_readme"
     "config_locale"
     "config_services"
     "config_virtio_gpu"
@@ -166,6 +166,7 @@ STEP_DESCRIPTIONS=(
     "Install Node.js 22"
     "Install OpenClaw"
     "Configure OpenClaw (tools, daemon)"
+    "Copy readme to desktop"
     "Configure locale"
     "Configure systemd services"
     "Configure virtio-gpu resize"
@@ -309,8 +310,14 @@ do_debootstrap() {
     
     if [ -f "$CACHE_TAR" ]; then
         echo "  Using cached tarball: $CACHE_TAR"
-        sudo debootstrap --include="$INCLUDE_PKGS" \
-            --unpack-tarball="$CACHE_TAR" "$SUITE" "$MOUNT_DIR" "$MIRROR"
+        if ! sudo debootstrap --include="$INCLUDE_PKGS" \
+            --unpack-tarball="$CACHE_TAR" "$SUITE" "$MOUNT_DIR" "$MIRROR"; then
+            echo "  Cache tarball failed, removing stale cache and cleaning mount dir..."
+            rm -f "$CACHE_TAR"
+            sudo rm -rf "${MOUNT_DIR:?}"/*
+            sudo debootstrap --include="$INCLUDE_PKGS" \
+                "$SUITE" "$MOUNT_DIR" "$MIRROR"
+        fi
     else
         echo "  No cache found, downloading packages (first run)..."
         sudo debootstrap --include="$INCLUDE_PKGS" \
@@ -348,6 +355,7 @@ PRC
     # Copy rootfs helper scripts and services
     sudo cp -r "$SCRIPT_DIR/../rootfs-scripts" "$MOUNT_DIR/tmp/"
     sudo cp -r "$SCRIPT_DIR/../rootfs-services" "$MOUNT_DIR/tmp/"
+    sudo cp -r "$SCRIPT_DIR/../rootfs-configs" "$MOUNT_DIR/tmp/"
 }
 
 do_config_basic() {
@@ -681,6 +689,20 @@ touch /var/lib/systemd/linger/$USER_NAME
 EOF
 }
 
+do_copy_readme() {
+    sudo chroot "$MOUNT_DIR" /bin/bash -e << EOF
+DESKTOP_DIR="/home/$USER_NAME/Desktop"
+if [ -f "\$DESKTOP_DIR/使用说明.txt" ]; then
+    echo "  Readme already copied"
+    exit 0
+fi
+
+mkdir -p "\$DESKTOP_DIR"
+cp /tmp/rootfs-configs/openclaw-readme.txt "\$DESKTOP_DIR/使用说明.txt"
+chown $USER_NAME:$USER_NAME "\$DESKTOP_DIR/使用说明.txt"
+EOF
+}
+
 do_config_locale() {
     sudo chroot "$MOUNT_DIR" /bin/bash -e << 'EOF'
 # Check if locale already configured
@@ -708,7 +730,7 @@ if [ -f /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf ]; then
 fi
 
 mkdir -p /etc/polkit-1/rules.d
-cp /tmp/rootfs-services/50-terrence-power.rules /etc/polkit-1/rules.d/
+cp /tmp/rootfs-services/50-user-power.rules /etc/polkit-1/rules.d/
 
 mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
 cp /tmp/rootfs-services/serial-getty-autologin.conf /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
@@ -856,7 +878,7 @@ rm -rf /var/log/*.log /var/log/apt/* /var/log/dpkg.log
 EOF
     
     sudo rm -f "$MOUNT_DIR/usr/sbin/policy-rc.d"
-    sudo rm -rf "$MOUNT_DIR/tmp/rootfs-scripts" "$MOUNT_DIR/tmp/rootfs-services"
+    sudo rm -rf "$MOUNT_DIR/tmp/rootfs-scripts" "$MOUNT_DIR/tmp/rootfs-services" "$MOUNT_DIR/tmp/rootfs-configs"
     sudo rm -f "$MOUNT_DIR/etc/resolv.conf"
     
     # Unmount apt cache
@@ -915,6 +937,7 @@ run_step "install_usertools" "Installing user tools"  do_install_usertools
 run_step "install_nodejs" "Installing Node.js"        do_install_nodejs
 run_step "install_openclaw" "Installing OpenClaw"     do_install_openclaw
 run_step "config_openclaw" "Configuring OpenClaw"     do_config_openclaw
+run_step "copy_readme"    "Copying readme to desktop"  do_copy_readme
 run_step "config_locale"  "Configuring locale"        do_config_locale
 run_step "config_services" "Configuring services"     do_config_services
 run_step "config_virtio_gpu" "Configuring virtio-gpu" do_config_virtio_gpu

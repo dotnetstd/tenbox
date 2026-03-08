@@ -5,7 +5,7 @@
 #   ./scripts/docker/build.sh <arch> <target> [extra-args...]
 #
 # arch:   arm64 | x86_64
-# target: rootfs | initramfs | kernel
+# target: rootfs | rootfs-copaw | rootfs-openclaw | initramfs | kernel
 #
 # Examples:
 #   ./scripts/docker/build.sh arm64 rootfs
@@ -15,6 +15,8 @@
 #   ./scripts/docker/build.sh arm64 kernel
 #   ./scripts/docker/build.sh x86_64 rootfs
 #   ./scripts/docker/build.sh x86_64 rootfs --force
+#   ./scripts/docker/build.sh x86_64 rootfs-copaw
+#   ./scripts/docker/build.sh x86_64 rootfs-openclaw
 #   ./scripts/docker/build.sh x86_64 initramfs
 #   ./scripts/docker/build.sh x86_64 kernel
 #
@@ -42,6 +44,12 @@ resolve_script() {
                 echo "scripts/x86_64/make-rootfs-base.sh"
             fi
             ;;
+        rootfs-copaw)
+            echo "scripts/x86_64/make-rootfs-copaw.sh"
+            ;;
+        rootfs-openclaw)
+            echo "scripts/x86_64/make-rootfs-openclaw.sh"
+            ;;
         initramfs)
             echo "scripts/${arch}/make-initramfs.sh"
             ;;
@@ -52,7 +60,7 @@ resolve_script() {
             echo "scripts/${arch}/build-virtio-snd.sh"
             ;;
         *)
-            echo "Error: unknown target '$target' (use: rootfs, initramfs, kernel, virtio-snd)" >&2
+            echo "Error: unknown target '$target' (use: rootfs, rootfs-copaw, rootfs-openclaw, initramfs, kernel, virtio-snd)" >&2
             exit 1
             ;;
     esac
@@ -77,13 +85,13 @@ if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     echo ""
 fi
 
-WORK_DIR="/workspace/build/.rootfs-work/${ARCH}-${TARGET}"
+WORK_DIR="/tmp/tenbox-${ARCH}-${TARGET}"
 
 exec docker run --rm --privileged \
     -v "$PROJECT_ROOT:/workspace" \
     -e ROOT_PASSWORD="${ROOT_PASSWORD:-tenbox}" \
-    -e USER_NAME="${USER_NAME:-terrence}" \
-    -e USER_PASSWORD="${USER_PASSWORD:-terrence}" \
+    -e USER_NAME="${USER_NAME:-tenbox}" \
+    -e USER_PASSWORD="${USER_PASSWORD:-tenbox}" \
     -e TENBOX_WORK_DIR="$WORK_DIR" \
     "$IMAGE_NAME" \
     -c "/workspace/$SCRIPT_PATH $*"

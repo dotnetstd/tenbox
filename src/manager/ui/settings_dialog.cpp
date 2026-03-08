@@ -153,6 +153,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
     case WM_INITDIALOG: {
         data = reinterpret_cast<SettingsDlgData*>(lp);
         SetWindowLongPtrW(dlg, DWLP_USER, reinterpret_cast<LONG_PTR>(data));
+        CenterDialogToParent(dlg);
         UpdateEditDisplays(dlg, data->mgr);
         UpdateCacheSizeLabel(dlg, data->mgr);
 
@@ -245,7 +246,7 @@ bool ShowSettingsDialog(HWND parent, ManagerService& mgr) {
 
     int W = 340, H = 170;
     b.Begin(i18n::tr(S::kDlgSettings), 0, 0, W, H,
-            WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER | DS_SETFONT);
+            WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_SETFONT);
 
     int x = 8, y = 8;
     int edit_w = W - 16 - 50 - 40 - 8;

@@ -64,6 +64,7 @@ static INT_PTR CALLBACK SfDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_INITDIALOG: {
         data = reinterpret_cast<SfDlgData*>(lp);
         SetWindowLongPtrW(dlg, DWLP_USER, reinterpret_cast<LONG_PTR>(data));
+        CenterDialogToParent(dlg);
 
         RECT rc;
         GetClientRect(dlg, &rc);
@@ -201,7 +202,7 @@ void ShowSharedFoldersDialog(HWND parent, ManagerService& mgr, const std::string
     DlgBuilder b;
     int W = 380, H = 200;
     b.Begin(i18n::tr(S::kDlgSharedFolders), 0, 0, W, H,
-        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER | DS_SETFONT);
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_SETFONT);
 
     int btn_h = 14, btn_w = 50;
     b.AddButton(IDC_SF_ADD,    i18n::tr(S::kSfBtnAdd),    0, 0, btn_w, btn_h);
