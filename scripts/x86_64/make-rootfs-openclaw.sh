@@ -486,8 +486,7 @@ fi
 echo "Installing development tools..."
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 python3-pip python3-venv \
-    g++ make cmake git \
-    inotify-tools
+    g++ make cmake git
 EOF
 }
 
@@ -733,7 +732,7 @@ mkdir -p /etc/polkit-1/rules.d
 cp /tmp/rootfs-services/50-user-power.rules /etc/polkit-1/rules.d/
 
 mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
-cp /tmp/rootfs-services/serial-getty-autologin.conf /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
+cp /tmp/rootfs-services/serial-getty-ttyS0-autologin.conf /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
 
 mkdir -p /etc/lightdm/lightdm.conf.d
 cat > /etc/lightdm/lightdm.conf.d/50-autologin.conf << LDM
@@ -907,17 +906,7 @@ do_convert_qcow2() {
     mkdir -p "$(dirname "$OUTPUT")"
 
     echo "Converting to qcow2..."
-    # Prefer Windows qemu-img.exe (supports zstd), fallback to WSL version
-    WIN_QEMU="/mnt/c/Program Files/qemu/qemu-img.exe"
-    if [ -x "$WIN_QEMU" ]; then
-        echo "  Using Windows qemu-img with zstd compression..."
-        WIN_RAW=$(wslpath -w "$WORK_DIR/rootfs.raw")
-        WIN_OUTPUT=$(wslpath -w "$OUTPUT")
-        "$WIN_QEMU" convert -f raw -O qcow2 -o cluster_size=65536,compression_type=zstd -c "$WIN_RAW" "$WIN_OUTPUT"
-    else
-        echo "  Using WSL qemu-img with zlib compression..."
-        qemu-img convert -f raw -O qcow2 -o cluster_size=65536,compression_type=zstd -c "$WORK_DIR/rootfs.raw" "$OUTPUT"
-    fi
+    qemu-img convert -f raw -O qcow2 -o cluster_size=65536,compression_type=zstd -c "$WORK_DIR/rootfs.raw" "$OUTPUT"
 }
 
 # Execute all steps

@@ -10,7 +10,7 @@
 # Or manually:
 #   docker build -t tenbox-builder scripts/docker/
 #   docker run --privileged -v $(pwd):/workspace tenbox-builder \
-#       /workspace/scripts/arm64/make-rootfs.sh
+#       /workspace/scripts/arm64/make-rootfs-base.sh
 
 # --- Stage 1: build qemu-img with zstd ---
 FROM debian:bookworm-slim AS qemu-build

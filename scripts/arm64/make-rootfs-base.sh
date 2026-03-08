@@ -6,10 +6,10 @@
 # Run as root on an arm64 host (or in a container).
 #
 # Usage:
-#   ./make-rootfs.sh [output.qcow2]
-#   ./make-rootfs.sh --force [output.qcow2]
-#   ./make-rootfs.sh --list-steps
-#   ./make-rootfs.sh --status
+#   ./make-rootfs-base.sh [output.qcow2]
+#   ./make-rootfs-base.sh --force [output.qcow2]
+#   ./make-rootfs-base.sh --list-steps
+#   ./make-rootfs-base.sh --status
 
 set -e
 
@@ -53,7 +53,7 @@ OUTPUT_ARG=""
 
 show_help() {
     cat << 'HELP'
-Usage: ./make-rootfs.sh [OPTIONS] [output.qcow2]
+Usage: ./make-rootfs-base.sh [OPTIONS] [output.qcow2]
 
 Build a minimal Debian arm64 desktop rootfs image for TenBox macOS.
 
@@ -453,14 +453,8 @@ fi
 mkdir -p /etc/polkit-1/rules.d
 cp /tmp/rootfs-services/50-user-power.rules /etc/polkit-1/rules.d/
 
-# AArch64 uses ttyAMA0 (PL011 UART) instead of ttyS0
 mkdir -p /etc/systemd/system/serial-getty@ttyAMA0.service.d
-cat > /etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf << 'AUTOLOGIN'
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin $USER_NAME -s %I 115200,38400,9600 vt102
-Type=idle
-AUTOLOGIN
+cp /tmp/rootfs-services/serial-getty-ttyAMA0-autologin.conf /etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf
 
 systemctl enable serial-getty@ttyAMA0.service 2>/dev/null || true
 

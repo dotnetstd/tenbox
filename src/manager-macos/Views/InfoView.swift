@@ -117,12 +117,12 @@ struct InfoView: View {
                                 HStack(spacing: 8) {
                                     Image(systemName: "network")
                                         .foregroundStyle(.secondary)
-                                    Text("127.0.0.1:\(pf.hostPort)")
+                                    Text(verbatim: "127.0.0.1:\(pf.hostPort)")
                                         .fontWeight(.medium)
                                     Image(systemName: "arrow.right")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
-                                    Text("guest:\(pf.guestPort)")
+                                    Text(verbatim: "guest:\(pf.guestPort)")
                                         .foregroundStyle(.secondary)
                                     Spacer()
                                     Button(role: .destructive) {

@@ -39,16 +39,24 @@ resolve_script() {
     case "$target" in
         rootfs)
             if [ "$arch" = "arm64" ]; then
-                echo "scripts/arm64/make-rootfs.sh"
+                echo "scripts/arm64/make-rootfs-base.sh"
             else
                 echo "scripts/x86_64/make-rootfs-base.sh"
             fi
             ;;
         rootfs-copaw)
-            echo "scripts/x86_64/make-rootfs-copaw.sh"
+            if [ "$arch" = "arm64" ]; then
+                echo "scripts/arm64/make-rootfs-copaw.sh"
+            else
+                echo "scripts/x86_64/make-rootfs-copaw.sh"
+            fi
             ;;
         rootfs-openclaw)
-            echo "scripts/x86_64/make-rootfs-openclaw.sh"
+            if [ "$arch" = "arm64" ]; then
+                echo "scripts/arm64/make-rootfs-openclaw.sh"
+            else
+                echo "scripts/x86_64/make-rootfs-openclaw.sh"
+            fi
             ;;
         initramfs)
             echo "scripts/${arch}/make-initramfs.sh"

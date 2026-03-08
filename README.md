@@ -160,7 +160,7 @@ When NAT is enabled, TenBox provides a user-mode network:
 - **ICMP** — relayed via raw socket (requires admin for ping)
 - **Port forwarding** — configurable per VM; e.g., host port 2222 → guest port 22
 
-### Guest Defaults (built by `make-rootfs.sh`)
+### Guest Defaults (built by `make-rootfs-base.sh`)
 
 | Setting | Default | Override |
 |---|---|---|
