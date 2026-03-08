@@ -46,16 +46,6 @@ struct InfoView: View {
                     .padding(8)
                 }
 
-                GroupBox("Network") {
-                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
-                        GridRow {
-                            Text("Network").foregroundStyle(.secondary)
-                            Text(vm.netEnabled ? "Enabled" : "Disabled")
-                                .foregroundStyle(vm.netEnabled ? .primary : .secondary)
-                        }
-                    }
-                    .padding(8)
-                }
             }
             .padding()
         }

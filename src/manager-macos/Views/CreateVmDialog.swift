@@ -13,7 +13,6 @@ struct CreateVmDialog: View {
     @State private var diskPath = ""
     @State private var memoryGb: Int = min(4, hostMaxMemoryGb)
     @State private var cpuCount: Int = min(4, hostMaxCpus)
-    @State private var netEnabled = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -45,10 +44,6 @@ struct CreateVmDialog: View {
                         TextField("Disk Image", text: $diskPath)
                         Button("Browse...") { browseDisk() }
                     }
-                }
-
-                Section("Network") {
-                    Toggle("Enable NAT Networking", isOn: $netEnabled)
                 }
             }
             .formStyle(.grouped)
@@ -106,7 +101,7 @@ struct CreateVmDialog: View {
             diskPath: diskPath,
             memoryMb: memoryGb * 1024,
             cpuCount: cpuCount,
-            netEnabled: netEnabled
+            netEnabled: true
         )
         appState.createVm(config: config)
         dismiss()
@@ -122,14 +117,12 @@ struct EditVmDialog: View {
     @State private var name: String
     @State private var memoryGb: Int
     @State private var cpuCount: Int
-    @State private var netEnabled: Bool
 
     init(vm: VmInfo) {
         self.vm = vm
         _name = State(initialValue: vm.name)
         _memoryGb = State(initialValue: max(1, vm.memoryMb / 1024))
         _cpuCount = State(initialValue: vm.cpuCount)
-        _netEnabled = State(initialValue: vm.netEnabled)
     }
 
     var body: some View {
@@ -144,10 +137,6 @@ struct EditVmDialog: View {
                     TextField("Name", text: $name)
                     Stepper("CPUs: \(cpuCount)", value: $cpuCount, in: 1...hostMaxCpus)
                     Stepper("Memory: \(memoryGb) GB", value: $memoryGb, in: 1...hostMaxMemoryGb)
-                }
-
-                Section("Network") {
-                    Toggle("Enable NAT Networking", isOn: $netEnabled)
                 }
 
                 Section("Paths (read-only)") {
@@ -187,7 +176,7 @@ struct EditVmDialog: View {
             name: name,
             memoryMb: memoryGb * 1024,
             cpuCount: cpuCount,
-            netEnabled: netEnabled
+            netEnabled: true
         )
         dismiss()
     }
