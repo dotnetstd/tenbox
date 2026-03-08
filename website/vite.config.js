@@ -13,5 +13,11 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(versionJson.latest_version),
     __APP_DOWNLOAD_URL__: JSON.stringify(versionJson.download_url),
+    __APP_DOWNLOAD_URL_WIN__: JSON.stringify(
+      versionJson.platforms?.windows?.download_url ?? versionJson.download_url
+    ),
+    __APP_DOWNLOAD_URL_MAC__: JSON.stringify(
+      versionJson.platforms?.macos?.download_url ?? ''
+    ),
   },
 })

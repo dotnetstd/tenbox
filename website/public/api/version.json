@@ -1,8 +1,23 @@
 {
-  "latest_version": "0.2.6",
+  "latest_version": "0.3.0",
   "min_supported_version": "0.1.0",
-  "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.2.6.msi",
-  "release_notes": "更灵活的CPU和内存配置\n更详细的虚拟化启动提示\n修复切换VM后仍然停留在控制台\n修复启动VM可能失败的问题",
-  "release_date": "2026-03-06",
-  "sha256": ""
+  "release_notes": "版本号统一管理\n更灵活的CPU和内存配置\n更详细的虚拟化启动提示\n修复切换VM后仍然停留在控制台\n修复启动VM可能失败的问题",
+  "release_date": "2026-03-08",
+
+  "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.3.0.msi",
+  "sha256": "",
+
+  "platforms": {
+    "windows": {
+      "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.3.0.msi",
+      "sha256": "",
+      "min_os": "Windows 10"
+    },
+    "macos": {
+      "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.3.0.dmg",
+      "sha256": "",
+      "min_os": "macOS 14.0",
+      "arch": "arm64"
+    }
+  }
 }

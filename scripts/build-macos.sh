@@ -24,9 +24,21 @@ case "$BUILD_TYPE" in
         ;;
 esac
 
+VERSION=$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")
+if [ -z "$VERSION" ]; then
+    echo "Error: Could not read version from $ROOT_DIR/VERSION"
+    exit 1
+fi
+
 echo "===================================="
-echo " TenBox macOS Build ($CMAKE_BUILD_TYPE)"
+echo " TenBox macOS Build v$VERSION ($CMAKE_BUILD_TYPE)"
 echo "===================================="
+echo ""
+
+# Stamp the version into Info.plist before building
+PLIST="$ROOT_DIR/src/manager-macos/Resources/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
+echo "Version $VERSION written to Info.plist"
 echo ""
 
 # Step 1: Build the C++ runtime via CMake

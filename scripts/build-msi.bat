@@ -4,11 +4,11 @@ setlocal enabledelayedexpansion
 set PROJECT_DIR=%~dp0..
 set BUILD_DIR=%PROJECT_DIR%\build\x64-release
 
-:: Extract version from CMakeLists.txt (e.g. "project(TenBox VERSION 0.1.0 ...")
-for /f "tokens=3" %%v in ('findstr /c:"VERSION" "%PROJECT_DIR%\CMakeLists.txt" ^| findstr /r "^project"') do set VERSION=%%v
+:: Read version from the single-source-of-truth VERSION file
+set /p VERSION=<"%PROJECT_DIR%\VERSION"
 
 if "%VERSION%"=="" (
-    echo ERROR: Could not extract version from CMakeLists.txt
+    echo ERROR: Could not read version from %PROJECT_DIR%\VERSION
     exit /b 1
 )
 echo Building TenBox v%VERSION% MSI installer...

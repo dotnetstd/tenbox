@@ -1,7 +1,9 @@
 import SwiftUI
 import AppKit
 
-let kTenBoxVersion = "0.2.6"
+let kTenBoxVersion: String = {
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+}()
 let kTenBoxCopyright = "Copyright \u{00A9} 2026 terrence@tenclass.com"
 
 @main
