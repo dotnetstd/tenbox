@@ -6,7 +6,7 @@
     <description>TenBox macOS Updates</description>
     <language>zh-CN</language>
     <item>
-      <title>Version 0.3.1</title>
+      <title>Version 0.3.2</title>
       <description><![CDATA[
         <ul>
           <li>新版本发布</li>
@@ -15,11 +15,11 @@
       <pubDate>Mon, 09 Mar 2026 00:00:00 -0000</pubDate>
       <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
       <enclosure
-        url="https://files.xiaozhi.me/tenbox/releases/TenBox_0.3.1_arm64.zip"
-        sparkle:version="0.3.1"
-        sparkle:shortVersionString="0.3.1"
-        sparkle:edSignature="xsJnL1+ULjbtvWq12qEsNG/YbT9JL1U71BKddRMSt9TfIuAfBLRI8pMj6AYiOAPL44V+zhdXiqdwIoUMMuOoBw=="
-        length="2813390"
+        url="https://files.xiaozhi.me/tenbox/releases/TenBox_0.3.2_arm64.zip"
+        sparkle:version="0.3.2"
+        sparkle:shortVersionString="0.3.2"
+        sparkle:edSignature="HvcqVfPIhrBzwATkw9pHlsO6aHbCGgH5y918P0ZgjtKylzT4hLf1V1lLtveIjj38Ocl97nX1Zw1VG+OJp2B/Bg=="
+        length="2813393"
         type="application/octet-stream"
       />
     </item>

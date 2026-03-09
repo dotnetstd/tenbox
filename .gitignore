@@ -5,6 +5,7 @@ out/
 .wix/
 .vs/
 .vscode/
+.DS_Store
 *.obj
 *.exe
 *.pdb

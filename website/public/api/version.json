@@ -16,12 +16,12 @@
       "min_os": "Windows 10"
     },
     "macos": {
-      "latest_version": "0.3.1",
+      "latest_version": "0.3.2",
       "release_notes": "新版本发布",
       "release_date": "2026-03-09",
       "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_arm64.dmg",
-      "sha256": "eaf094b4cbab4b83588730a20037dc1c6b2bdcfec062ec91903f753b4a3e6ca7",
-      "size": 2720147,
+      "sha256": "bf0ca9e02905959208dff629c983566920123729e3113062ae0cfbf9bf8d6609",
+      "size": 2720105,
       "min_os": "macOS 13.0"
     }
   }

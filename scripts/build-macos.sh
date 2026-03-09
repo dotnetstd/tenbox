@@ -53,6 +53,7 @@ echo ""
 
 # Stamp the version into Info.plist before building
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$PLIST"
 echo "Version $VERSION written to Info.plist"
 echo ""
 
