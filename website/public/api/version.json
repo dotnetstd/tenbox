@@ -3,15 +3,15 @@
   "min_supported_version": "0.1.0",
   "release_notes": "版本号更改为 0.3.3\n更新内容详见 GitHub",
   "release_date": "2026-03-11",
-  "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.4.0.msi",
-  "sha256": "5cf0a5c0694d4a60bbdbb2fdfc932c04883cb856c26f74c91a5adb65a9e986e9",
+  "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.4.0_fixdns.msi",
+  "sha256": "fe5cd2a10c91d42abcd4be8f56a02434cd41342e9d9f2b382876294022d1112b",
   "platforms": {
     "windows": {
       "latest_version": "0.4.0",
       "release_notes": "版本号更改为 0.3.3\n更新内容详见 GitHub",
       "release_date": "2026-03-11",
-      "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.4.0.msi",
-      "sha256": "5cf0a5c0694d4a60bbdbb2fdfc932c04883cb856c26f74c91a5adb65a9e986e9",
+      "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.4.0_fixdns.msi",
+      "sha256": "fe5cd2a10c91d42abcd4be8f56a02434cd41342e9d9f2b382876294022d1112b",
       "size": 2142208,
       "min_os": "Windows 10"
     },

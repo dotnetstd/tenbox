@@ -6,6 +6,8 @@
 
 #include <cstring>
 #include <memory>
+#include <vector>
+#include <algorithm>
 
 // ============================================================
 // Host DNS resolver lookup
@@ -13,23 +15,56 @@
 
 uint32_t NetBackend::GetHostDnsServer() {
 #ifdef _WIN32
-    ULONG buf_len = sizeof(FIXED_INFO);
-    auto buf = std::make_unique<uint8_t[]>(buf_len);
-    DWORD ret = GetNetworkParams(reinterpret_cast<FIXED_INFO*>(buf.get()), &buf_len);
-    if (ret == ERROR_BUFFER_OVERFLOW) {
+    struct AdapterDnsInfo {
+        uint32_t dns_addr;
+        uint32_t metric;
+    };
+
+    ULONG buf_len = 15000;
+    std::unique_ptr<uint8_t[]> buf;
+    ULONG ret;
+
+    for (int i = 0; i < 3; i++) {
         buf = std::make_unique<uint8_t[]>(buf_len);
-        ret = GetNetworkParams(reinterpret_cast<FIXED_INFO*>(buf.get()), &buf_len);
+        ret = GetAdaptersAddresses(AF_INET,
+                GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
+                nullptr,
+                reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.get()),
+                &buf_len);
+        if (ret == ERROR_SUCCESS) break;
+        if (ret != ERROR_BUFFER_OVERFLOW) return 0x08080808;
     }
-    if (ret == NO_ERROR) {
-        auto* info = reinterpret_cast<FIXED_INFO*>(buf.get());
-        for (auto* entry = &info->DnsServerList; entry; entry = entry->Next) {
-            unsigned long addr = inet_addr(entry->IpAddress.String);
-            if (addr == INADDR_NONE || addr == 0)
-                continue;
-            if ((ntohl(addr) >> 24) == 127)
-                continue;
-            return ntohl(addr);
+
+    if (ret != ERROR_SUCCESS) return 0x08080808;
+
+    std::vector<AdapterDnsInfo> candidates;
+    auto* adapter = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.get());
+
+    while (adapter) {
+        if (adapter->OperStatus == IfOperStatusUp &&
+            adapter->IfType != IF_TYPE_SOFTWARE_LOOPBACK) {
+
+            uint32_t total_metric = adapter->Ipv4Metric;
+
+            for (auto* dns = adapter->FirstDnsServerAddress; dns; dns = dns->Next) {
+                if (dns->Address.lpSockaddr->sa_family == AF_INET) {
+                    auto* si = reinterpret_cast<sockaddr_in*>(dns->Address.lpSockaddr);
+                    uint32_t addr = ntohl(si->sin_addr.s_addr);
+                    if ((addr >> 24) != 127 && addr != 0) {
+                        candidates.push_back({addr, total_metric});
+                    }
+                }
+            }
         }
+        adapter = adapter->Next;
+    }
+
+    if (!candidates.empty()) {
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const AdapterDnsInfo& a, const AdapterDnsInfo& b) {
+                      return a.metric < b.metric;
+                  });
+        return candidates[0].dns_addr;
     }
 #else
     FILE* fp = fopen("/etc/resolv.conf", "r");
