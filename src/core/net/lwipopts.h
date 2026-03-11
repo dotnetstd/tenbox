@@ -41,6 +41,7 @@
 #define PBUF_POOL_BUFSIZE           1600
 
 // TCP tuning
+#undef TCP_MSS
 #define TCP_MSS                     1460
 #define LWIP_WND_SCALE              1
 #define TCP_RCV_SCALE               7
@@ -67,6 +68,9 @@
 #define CHECKSUM_CHECK_UDP          0
 #define CHECKSUM_CHECK_TCP          0
 #define CHECKSUM_CHECK_ICMP         0
+
+// Avoid redefining htons/ntohs/htonl/ntohl already provided by the OS
+#define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS 1
 
 // Disable features we don't need
 #define LWIP_NETIF_STATUS_CALLBACK  0

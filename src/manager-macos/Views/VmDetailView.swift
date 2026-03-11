@@ -110,6 +110,9 @@ class VmSession: ObservableObject {
                 if self.ipcClient.attach(fd: fd) {
                     self.connected = true
                     self.audioPlayer.start()
+                    if !self.displayInitialized {
+                        self.activeTab = 1
+                    }
                 }
                 self.connecting = false
             }
@@ -276,6 +279,10 @@ struct VmDetailView: View {
 
         let newFrame = NSRect(x: newX, y: newY, width: finalW, height: finalH)
         print("[resizeWindow] final=\(finalW)x\(finalH)")
+
+        // Suppress the reverse notify: the window resize driven by guest
+        // display size should not bounce back as a host→guest set_size.
+        session.lastResizeFromVmTime = CACurrentMediaTime()
         window.setFrame(newFrame, display: true, animate: false)
     }
 }

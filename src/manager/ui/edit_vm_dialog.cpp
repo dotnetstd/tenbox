@@ -65,6 +65,7 @@ static LRESULT CALLBACK EditDlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARA
             std::string error;
             if (data->mgr->EditVm(data->rec.spec.vm_id, patch, &error)) {
                 data->saved = true;
+                EnableWindow(GetWindow(dlg, GW_OWNER), TRUE);
                 DestroyWindow(dlg);
             } else {
                 MessageBoxW(dlg, i18n::to_wide(error).c_str(),
@@ -75,6 +76,7 @@ static LRESULT CALLBACK EditDlgSubclassProc(HWND dlg, UINT msg, WPARAM wp, LPARA
         break;
 
     case WM_CLOSE:
+        EnableWindow(GetWindow(dlg, GW_OWNER), TRUE);
         DestroyWindow(dlg);
         return 0;
 
@@ -259,7 +261,6 @@ bool ShowEditVmDialog(HWND parent, ManagerService& mgr,
     }
 
     EnableWindow(parent, TRUE);
-    SetForegroundWindow(parent);
 
     if (error) *error = data.error;
     return data.saved;

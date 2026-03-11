@@ -58,6 +58,15 @@ size_t ManagedConsolePort::Read(uint8_t* out, size_t size) {
 
 void ManagedConsolePort::PushInput(const uint8_t* data, size_t size) {
     if (!data || size == 0) return;
+    InputCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cb = input_callback_;
+    }
+    if (cb) {
+        cb(data, size);
+        return;
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (size_t i = 0; i < size; ++i) {
@@ -65,6 +74,11 @@ void ManagedConsolePort::PushInput(const uint8_t* data, size_t size) {
         }
     }
     cv_.notify_all();
+}
+
+void ManagedConsolePort::SetInputCallback(InputCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    input_callback_ = std::move(cb);
 }
 
 // ── ManagedInputPort ─────────────────────────────────────────────────
@@ -86,13 +100,41 @@ bool ManagedInputPort::PollPointer(PointerEvent* event) {
 }
 
 void ManagedInputPort::PushKeyEvent(const KeyboardEvent& ev) {
+    KeyCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cb = key_callback_;
+    }
+    if (cb) {
+        cb(ev);
+        return;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     key_queue_.push_back(ev);
 }
 
 void ManagedInputPort::PushPointerEvent(const PointerEvent& ev) {
+    PointerCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cb = pointer_callback_;
+    }
+    if (cb) {
+        cb(ev);
+        return;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     pointer_queue_.push_back(ev);
+}
+
+void ManagedInputPort::SetKeyEventCallback(KeyCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    key_callback_ = std::move(cb);
+}
+
+void ManagedInputPort::SetPointerEventCallback(PointerCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pointer_callback_ = std::move(cb);
 }
 
 // ── ManagedDisplayPort ───────────────────────────────────────────────
@@ -208,7 +250,7 @@ std::vector<uint8_t> DecodeHex(const std::string& value) {
 RuntimeControlService::RuntimeControlService(std::string vm_id, std::string pipe_name)
     : vm_id_(std::move(vm_id)), pipe_name_(std::move(pipe_name)) {
     console_port_->SetDataAvailableCallback([this]() {
-        send_cv_.notify_one();
+        if (running_) uv_async_send(&send_wakeup_);
     });
 
     display_port_->SetFrameHandler([this](DisplayFrame frame) {
@@ -293,7 +335,7 @@ RuntimeControlService::RuntimeControlService(std::string vm_id, std::string pipe
             frame_queue_.clear();
             frame_queue_.push_back(std::move(encoded));
         }
-        send_cv_.notify_one();
+        if (running_) uv_async_send(&send_wakeup_);
     });
 
     display_port_->SetCursorHandler([this](const CursorInfo& cursor) {
@@ -312,7 +354,13 @@ RuntimeControlService::RuntimeControlService(std::string vm_id, std::string pipe
         event.fields["visible"] = cursor.visible ? "1" : "0";
         event.fields["image_updated"] = cursor.image_updated ? "1" : "0";
         if (cursor.image_updated && !cursor.pixels.empty()) {
-            event.payload = cursor.pixels;
+            size_t expected = static_cast<size_t>(cursor.width) * cursor.height * 4;
+            if (cursor.pixels.size() >= expected) {
+                event.payload.assign(cursor.pixels.begin(),
+                                     cursor.pixels.begin() + expected);
+            } else {
+                event.payload = cursor.pixels;
+            }
         }
 
         std::string encoded = ipc::Encode(event);
@@ -320,7 +368,7 @@ RuntimeControlService::RuntimeControlService(std::string vm_id, std::string pipe
             std::lock_guard<std::mutex> lock(send_queue_mutex_);
             console_queue_.push_back(std::move(encoded));
         }
-        send_cv_.notify_one();
+        if (running_) uv_async_send(&send_wakeup_);
     });
 
     display_port_->SetStateHandler([this](bool active, uint32_t width, uint32_t height) {
@@ -339,7 +387,7 @@ RuntimeControlService::RuntimeControlService(std::string vm_id, std::string pipe
             std::lock_guard<std::mutex> lock(send_queue_mutex_);
             console_queue_.push_back(std::move(encoded));
         }
-        send_cv_.notify_one();
+        if (running_) uv_async_send(&send_wakeup_);
     });
 
     clipboard_port_->SetEventHandler([this](const ClipboardEvent& clip_event) {
@@ -387,7 +435,7 @@ RuntimeControlService::RuntimeControlService(std::string vm_id, std::string pipe
             std::lock_guard<std::mutex> lock(send_queue_mutex_);
             console_queue_.push_back(std::move(encoded));
         }
-        send_cv_.notify_one();
+        if (running_) uv_async_send(&send_wakeup_);
     });
 
     audio_port_->SetPcmHandler([this](AudioChunk chunk) {
@@ -411,7 +459,7 @@ RuntimeControlService::RuntimeControlService(std::string vm_id, std::string pipe
                 audio_queue_.pop_front();
             }
         }
-        send_cv_.notify_one();
+        if (running_) uv_async_send(&send_wakeup_);
     });
 }
 
@@ -421,104 +469,48 @@ RuntimeControlService::~RuntimeControlService() {
 
 bool RuntimeControlService::Start() {
     if (running_) return true;
-    if (!EnsureClientConnected()) {
+    if (pipe_name_.empty()) return false;
+
+    loop_thread_ = std::thread(&RuntimeControlService::EventLoopThread, this);
+
+    std::unique_lock<std::mutex> lock(start_mutex_);
+    start_cv_.wait(lock, [this] { return loop_ready_; });
+
+    if (!pipe_connected_) {
+        if (loop_thread_.joinable()) loop_thread_.join();
         return false;
     }
 
     running_ = true;
-
-    send_thread_ = std::thread([this]() {
-        constexpr auto kFlushInterval = std::chrono::milliseconds(20);
-
-        while (running_) {
-            std::string batch;
-            {
-                std::unique_lock<std::mutex> lock(send_queue_mutex_);
-
-                bool has_pending = console_port_->HasPending();
-                if (has_pending) {
-                    send_cv_.wait_for(lock, kFlushInterval);
-                } else {
-                    send_cv_.wait(lock, [this]() {
-                        return !running_ || !console_queue_.empty() ||
-                               !frame_queue_.empty() || !audio_queue_.empty() ||
-                               console_port_->HasPending();
-                    });
-                }
-
-                if (!running_ && console_queue_.empty() &&
-                    frame_queue_.empty() && audio_queue_.empty()) {
-                    break;
-                }
-
-                std::string console_data = console_port_->FlushPending();
-                if (!console_data.empty()) {
-                    ipc::Message event;
-                    event.kind = ipc::Kind::kEvent;
-                    event.channel = ipc::Channel::kConsole;
-                    event.type = "console.data";
-                    event.vm_id = vm_id_;
-                    event.request_id = next_event_id_++;
-                    event.fields["data_hex"] = EncodeHex(
-                        reinterpret_cast<const uint8_t*>(console_data.data()),
-                        console_data.size());
-                    batch += ipc::Encode(event);
-                }
-
-                while (!console_queue_.empty()) {
-                    batch += std::move(console_queue_.front());
-                    console_queue_.pop_front();
-                }
-
-                size_t audio_to_send = audio_queue_.size();
-                while (audio_to_send-- > 0 && !audio_queue_.empty()) {
-                    batch += std::move(audio_queue_.front());
-                    audio_queue_.pop_front();
-                }
-
-                while (!frame_queue_.empty()) {
-                    batch += std::move(frame_queue_.front());
-                    frame_queue_.pop_front();
-                }
-            }
-
-            if (batch.empty()) {
-                continue;
-            }
-
-            std::lock_guard<std::mutex> send_lock(send_mutex_);
-            if (!transport_ || !transport_->IsConnected()) {
-                break;
-            }
-            if (!transport_->Send(batch)) {
-                break;
-            }
-        }
-    });
-
-    recv_thread_ = std::thread(&RuntimeControlService::RunLoop, this);
     return true;
 }
 
 void RuntimeControlService::Stop() {
+    if (!running_) return;
     running_ = false;
-    send_cv_.notify_all();
+    uv_async_send(&stop_wakeup_);
 
-    if (send_thread_.joinable()) {
-        send_thread_.join();
-    }
-
-    if (transport_) {
-        transport_->Close();
-    }
-
-    if (recv_thread_.joinable()) {
-        recv_thread_.join();
+    if (loop_thread_.joinable()) {
+        loop_thread_.join();
     }
 }
 
 void RuntimeControlService::AttachVm(Vm* vm) {
     vm_ = vm;
+
+    if (vm_) {
+        console_port_->SetInputCallback([vm](const uint8_t* data, size_t size) {
+            vm->InjectConsoleBytes(data, size);
+        });
+
+        input_port_->SetKeyEventCallback([vm](const KeyboardEvent& ev) {
+            vm->InjectKeyEvent(ev.key_code, ev.pressed);
+        });
+
+        input_port_->SetPointerEventCallback([vm](const PointerEvent& ev) {
+            vm->InjectPointerEvent(ev.x, ev.y, ev.buttons);
+        });
+    }
 
     if (vm_ && vm_->GetGuestAgentHandler()) {
         vm_->GetGuestAgentHandler()->SetConnectedCallback([this](bool connected) {
@@ -547,16 +539,21 @@ void RuntimeControlService::PublishState(const std::string& state, int exit_code
     Send(event);
 }
 
-bool RuntimeControlService::EnsureClientConnected() {
-    if (pipe_name_.empty()) return false;
-    if (transport_ && transport_->IsConnected()) return true;
+void RuntimeControlService::WriteRaw(const std::string& data) {
+    if (!pipe_connected_ || data.empty()) return;
 
-    transport_ = ipc::CreateClientTransport();
-    if (!transport_->Connect(pipe_name_)) {
-        transport_.reset();
-        return false;
-    }
-    return true;
+    auto* write_data = new std::string(data);
+    auto* req = new uv_write_t;
+    req->data = write_data;
+
+    uv_buf_t buf = uv_buf_init(const_cast<char*>(write_data->data()),
+                                static_cast<unsigned int>(write_data->size()));
+    uv_write(req, reinterpret_cast<uv_stream_t*>(&pipe_), &buf, 1, OnWriteDone);
+}
+
+void RuntimeControlService::OnWriteDone(uv_write_t* req, int /*status*/) {
+    delete static_cast<std::string*>(req->data);
+    delete req;
 }
 
 bool RuntimeControlService::Send(const ipc::Message& message) {
@@ -565,7 +562,7 @@ bool RuntimeControlService::Send(const ipc::Message& message) {
         std::lock_guard<std::mutex> lock(send_queue_mutex_);
         console_queue_.push_back(std::move(encoded));
     }
-    send_cv_.notify_one();
+    if (running_) uv_async_send(&send_wakeup_);
     return true;
 }
 
@@ -575,7 +572,7 @@ bool RuntimeControlService::SendWithPayload(const ipc::Message& message) {
         std::lock_guard<std::mutex> lock(send_queue_mutex_);
         console_queue_.push_back(std::move(encoded));
     }
-    send_cv_.notify_one();
+    if (running_) uv_async_send(&send_wakeup_);
     return true;
 }
 
@@ -900,56 +897,171 @@ void RuntimeControlService::HandleMessage(const ipc::Message& message) {
 
 }
 
-void RuntimeControlService::RunLoop() {
-    if (!EnsureClientConnected()) {
+void RuntimeControlService::FlushConsoleData() {
+    std::string console_data = console_port_->FlushPending();
+    if (console_data.empty()) return;
+
+    ipc::Message event;
+    event.kind = ipc::Kind::kEvent;
+    event.channel = ipc::Channel::kConsole;
+    event.type = "console.data";
+    event.vm_id = vm_id_;
+    event.request_id = next_event_id_++;
+    event.fields["data_hex"] = EncodeHex(
+        reinterpret_cast<const uint8_t*>(console_data.data()),
+        console_data.size());
+    WriteRaw(ipc::Encode(event));
+}
+
+void RuntimeControlService::DrainSendQueues() {
+    std::string batch;
+    {
+        std::lock_guard<std::mutex> lock(send_queue_mutex_);
+
+        while (!console_queue_.empty()) {
+            batch += std::move(console_queue_.front());
+            console_queue_.pop_front();
+        }
+
+        size_t audio_to_send = audio_queue_.size();
+        while (audio_to_send-- > 0 && !audio_queue_.empty()) {
+            batch += std::move(audio_queue_.front());
+            audio_queue_.pop_front();
+        }
+
+        while (!frame_queue_.empty()) {
+            batch += std::move(frame_queue_.front());
+            frame_queue_.pop_front();
+        }
+    }
+
+    if (batch.empty()) return;
+    WriteRaw(batch);
+}
+
+void RuntimeControlService::OnAllocBuffer(uv_handle_t* /*handle*/, size_t suggested, uv_buf_t* buf) {
+    buf->base = new char[suggested];
+    buf->len = static_cast<decltype(buf->len)>(suggested);
+}
+
+void RuntimeControlService::OnPipeRead(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
+    auto* self = static_cast<RuntimeControlService*>(stream->data);
+
+    if (nread < 0) {
+        delete[] buf->base;
+        uv_read_stop(stream);
+        return;
+    }
+    if (nread == 0) {
+        delete[] buf->base;
         return;
     }
 
-    std::array<char, 65536> buf{};
-    std::string pending;
-    size_t payload_needed = 0;
-    ipc::Message pending_msg;
+    self->recv_pending_.append(buf->base, static_cast<size_t>(nread));
+    delete[] buf->base;
 
-    while (running_) {
-        if (!transport_ || !transport_->IsConnected()) break;
+    while (!self->recv_pending_.empty()) {
+        if (self->recv_payload_needed_ > 0) {
+            if (self->recv_pending_.size() < self->recv_payload_needed_) break;
+            self->recv_pending_msg_.payload.assign(
+                reinterpret_cast<const uint8_t*>(self->recv_pending_.data()),
+                reinterpret_cast<const uint8_t*>(self->recv_pending_.data()) + self->recv_payload_needed_);
+            self->recv_pending_.erase(0, self->recv_payload_needed_);
+            self->recv_payload_needed_ = 0;
+            self->HandleMessage(self->recv_pending_msg_);
+            continue;
+        }
 
-        int poll_result = transport_->PollRead(10);
-        if (poll_result < 0) break;
-        if (poll_result == 0) continue;
+        size_t nl = self->recv_pending_.find('\n');
+        if (nl == std::string::npos) break;
+        std::string line = self->recv_pending_.substr(0, nl + 1);
+        self->recv_pending_.erase(0, nl + 1);
+        auto decoded = ipc::Decode(line);
+        if (!decoded) continue;
 
-        ssize_t n = transport_->Recv(buf.data(), buf.size());
-        if (n <= 0) break;
-        pending.append(buf.data(), static_cast<size_t>(n));
-
-        while (!pending.empty()) {
-            if (payload_needed > 0) {
-                if (pending.size() < payload_needed) break;
-                pending_msg.payload.assign(
-                    reinterpret_cast<const uint8_t*>(pending.data()),
-                    reinterpret_cast<const uint8_t*>(pending.data()) + payload_needed);
-                pending.erase(0, payload_needed);
-                payload_needed = 0;
-                HandleMessage(pending_msg);
+        auto ps_it = decoded->fields.find("payload_size");
+        if (ps_it != decoded->fields.end()) {
+            self->recv_payload_needed_ = std::strtoull(ps_it->second.c_str(), nullptr, 10);
+            decoded->fields.erase(ps_it);
+            if (self->recv_payload_needed_ > 0) {
+                self->recv_pending_msg_ = std::move(*decoded);
                 continue;
             }
-
-            size_t nl = pending.find('\n');
-            if (nl == std::string::npos) break;
-            std::string line = pending.substr(0, nl + 1);
-            pending.erase(0, nl + 1);
-            auto decoded = ipc::Decode(line);
-            if (!decoded) continue;
-
-            auto ps_it = decoded->fields.find("payload_size");
-            if (ps_it != decoded->fields.end()) {
-                payload_needed = std::strtoull(ps_it->second.c_str(), nullptr, 10);
-                decoded->fields.erase(ps_it);
-                if (payload_needed > 0) {
-                    pending_msg = std::move(*decoded);
-                    continue;
-                }
-            }
-            HandleMessage(*decoded);
         }
+        self->HandleMessage(*decoded);
     }
+}
+
+void RuntimeControlService::OnSendWakeup(uv_async_t* handle) {
+    auto* self = static_cast<RuntimeControlService*>(handle->data);
+
+    // Start coalesce timer for console data if pending and timer not running
+    if (self->console_port_->HasPending() && !self->coalesce_running_) {
+        uv_timer_start(&self->console_coalesce_timer_, OnConsoleCoalesce, 20, 0);
+        self->coalesce_running_ = true;
+    }
+
+    // Immediately drain non-console queues
+    self->DrainSendQueues();
+}
+
+void RuntimeControlService::OnConsoleCoalesce(uv_timer_t* handle) {
+    auto* self = static_cast<RuntimeControlService*>(handle->data);
+    self->coalesce_running_ = false;
+    self->FlushConsoleData();
+}
+
+static void RtcCloseWalkCb(uv_handle_t* handle, void*) {
+    if (!uv_is_closing(handle)) uv_close(handle, nullptr);
+}
+
+void RuntimeControlService::OnPipeConnect(uv_connect_t* req, int status) {
+    auto* self = static_cast<RuntimeControlService*>(req->data);
+    if (status < 0) {
+        LOG_ERROR("RuntimeService: uv_pipe_connect failed: %s", uv_strerror(status));
+        {
+            std::lock_guard<std::mutex> lock(self->start_mutex_);
+            self->loop_ready_ = true;
+        }
+        self->start_cv_.notify_one();
+        uv_walk(&self->loop_, RtcCloseWalkCb, nullptr);
+        return;
+    }
+
+    self->pipe_connected_ = true;
+    uv_read_start(reinterpret_cast<uv_stream_t*>(&self->pipe_), OnAllocBuffer, OnPipeRead);
+
+    {
+        std::lock_guard<std::mutex> lock(self->start_mutex_);
+        self->loop_ready_ = true;
+    }
+    self->start_cv_.notify_one();
+}
+
+void RuntimeControlService::OnStopSignal(uv_async_t* handle) {
+    auto* self = static_cast<RuntimeControlService*>(handle->data);
+    self->pipe_connected_ = false;
+    uv_walk(&self->loop_, RtcCloseWalkCb, nullptr);
+}
+
+void RuntimeControlService::EventLoopThread() {
+    uv_loop_init(&loop_);
+
+    pipe_.data = this;
+    uv_pipe_init(&loop_, &pipe_, 0);
+
+    send_wakeup_.data = this;
+    uv_async_init(&loop_, &send_wakeup_, OnSendWakeup);
+
+    stop_wakeup_.data = this;
+    uv_async_init(&loop_, &stop_wakeup_, OnStopSignal);
+
+    console_coalesce_timer_.data = this;
+    uv_timer_init(&loop_, &console_coalesce_timer_);
+
+    connect_req_.data = this;
+    uv_pipe_connect(&connect_req_, &pipe_, pipe_name_.c_str(), OnPipeConnect);
+
+    uv_run(&loop_, UV_RUN_DEFAULT);
+    uv_loop_close(&loop_);
 }

@@ -7,7 +7,18 @@
 #include "manager/app_settings.h"
 #include "core/vdagent/vdagent_protocol.h"
 
+#ifdef _WIN32
+#  ifndef _WIN32_WINNT
+#    define _WIN32_WINNT 0x0A00
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#endif
+#include <uv.h>
+
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -16,33 +27,42 @@
 #include <thread>
 #include <vector>
 
-struct PipeParseState {
-    size_t payload_needed = 0;
-    ipc::Message pending_msg;
-};
-
 struct VmRuntimeHandle {
     void* process_handle = nullptr;
     uint32_t process_id = 0;
-    void* pipe_handle = nullptr;
     std::string pipe_name;
-    std::thread read_thread;
-    std::atomic<bool> read_running{false};
+
+    // libuv event loop (one per VM, runs on loop_thread)
+    uv_loop_t loop{};
+    uv_pipe_t server_pipe{};
+    uv_pipe_t client_pipe{};
+    uv_async_t send_wakeup{};
+    uv_async_t stop_wakeup{};
+    std::thread loop_thread;
+    bool loop_initialized = false;
+    bool pipe_connected = false;
+
+    // Send queue: filled by any thread, drained on loop thread
+    std::mutex send_mutex;
+    std::deque<std::string> send_queue;
+
+    // Receive buffer (used only on loop thread)
+    std::string recv_pending;
+    size_t recv_payload_needed = 0;
+    ipc::Message recv_pending_msg;
 
     VmRuntimeHandle() = default;
     VmRuntimeHandle(const VmRuntimeHandle& o)
         : process_handle(o.process_handle),
           process_id(o.process_id),
-          pipe_handle(o.pipe_handle),
           pipe_name(o.pipe_name),
-          read_running(o.read_running.load()) {}
+          pipe_connected(o.pipe_connected) {}
     VmRuntimeHandle& operator=(const VmRuntimeHandle& o) {
         if (this != &o) {
             process_handle = o.process_handle;
             process_id = o.process_id;
-            pipe_handle = o.pipe_handle;
             pipe_name = o.pipe_name;
-            read_running.store(o.read_running.load());
+            pipe_connected = o.pipe_connected;
         }
         return *this;
     }
@@ -185,11 +205,25 @@ private:
     void LoadVms();
     void SaveVmPaths();
     void SaveVmPathsLocked();  // caller must hold vms_mutex_
-    void StartReadThread(const std::string& vm_id, VmRecord& vm);
-    void StopReadThread(VmRecord& vm);
-    void PipeReadThreadFunc(const std::string& vm_id);
-    void DispatchPipeData(std::string& pending, PipeParseState& parse,
-                         const std::string& vm_id);
+
+    // libuv per-VM event loop management
+    bool StartVmLoop(const std::string& vm_id, VmRecord& vm);
+    void StopVmLoop(VmRecord& vm);
+    void VmLoopThread(const std::string& vm_id);
+
+    // libuv callbacks (static, pointer to ManagerService via handle->data)
+    struct LoopContext {
+        ManagerService* service;
+        std::string vm_id;
+    };
+    static void OnConnection(uv_stream_t* server, int status);
+    static void OnAllocBuffer(uv_handle_t* handle, size_t suggested, uv_buf_t* buf);
+    static void OnPipeRead(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf);
+    static void OnWriteDone(uv_write_t* req, int status);
+    static void OnSendWakeup(uv_async_t* handle);
+    static void OnStopSignal(uv_async_t* handle);
+
+    void DispatchPipeData(VmRuntimeHandle& rt, const std::string& vm_id);
     void HandleProcessExit(const std::string& vm_id);
     void CleanupRuntimeHandles(VmRecord& vm);
     void HandleIncomingMessage(const std::string& vm_id, const ipc::Message& msg);

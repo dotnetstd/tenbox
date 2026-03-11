@@ -2,9 +2,6 @@ import SwiftUI
 
 struct InfoView: View {
     let vm: VmInfo
-    @EnvironmentObject var appState: AppState
-    @State private var showAddSheet = false
-    @State private var showAddPortForwardSheet = false
 
     private var vmDirectory: String {
         (vm.diskPath as NSString).deletingLastPathComponent
@@ -52,117 +49,8 @@ struct InfoView: View {
                     }
                     .padding(8)
                 }
-
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if vm.sharedFolders.isEmpty {
-                            Text("No shared folders")
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .center)
-                                .padding(.vertical, 4)
-                        } else {
-                            ForEach(vm.sharedFolders) { folder in
-                                HStack(spacing: 8) {
-                                    Image(systemName: "folder")
-                                        .foregroundStyle(.secondary)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(folder.tag)
-                                            .fontWeight(.medium)
-                                        Text(folder.hostPath)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
-                                            .truncationMode(.middle)
-                                    }
-                                    Spacer()
-                                    if folder.readonly {
-                                        Text("RO")
-                                            .font(.caption2)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(.quaternary)
-                                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                                    }
-                                    Button(role: .destructive) {
-                                        appState.removeSharedFolder(tag: folder.tag, fromVm: vm.id)
-                                    } label: {
-                                        Image(systemName: "minus.circle")
-                                    }
-                                    .buttonStyle(.borderless)
-                                }
-                                if folder.id != vm.sharedFolders.last?.id {
-                                    Divider()
-                                }
-                            }
-                        }
-                    }
-                    .padding(8)
-                } label: {
-                    HStack {
-                        Text("Shared Folders")
-                        Spacer()
-                        Button {
-                            showAddSheet = true
-                        } label: {
-                            Image(systemName: "plus")
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                }
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if vm.portForwards.isEmpty {
-                            Text("No port forwards")
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .center)
-                                .padding(.vertical, 4)
-                        } else {
-                            ForEach(vm.portForwards) { pf in
-                                HStack(spacing: 8) {
-                                    Image(systemName: "network")
-                                        .foregroundStyle(.secondary)
-                                    Text(verbatim: "127.0.0.1:\(pf.hostPort)")
-                                        .fontWeight(.medium)
-                                    Image(systemName: "arrow.right")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    Text(verbatim: "guest:\(pf.guestPort)")
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Button(role: .destructive) {
-                                        appState.removePortForward(hostPort: pf.hostPort, fromVm: vm.id)
-                                    } label: {
-                                        Image(systemName: "minus.circle")
-                                    }
-                                    .buttonStyle(.borderless)
-                                }
-                                if pf.id != vm.portForwards.last?.id {
-                                    Divider()
-                                }
-                            }
-                        }
-                    }
-                    .padding(8)
-                } label: {
-                    HStack {
-                        Text("Port Forwards")
-                        Spacer()
-                        Button {
-                            showAddPortForwardSheet = true
-                        } label: {
-                            Image(systemName: "plus")
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                }
             }
             .padding()
-        }
-        .sheet(isPresented: $showAddSheet) {
-            AddSharedFolderSheet(vmId: vm.id)
-        }
-        .sheet(isPresented: $showAddPortForwardSheet) {
-            AddPortForwardSheet(vmId: vm.id)
         }
     }
 }
@@ -284,5 +172,151 @@ struct AddPortForwardSheet: View {
         let pf = PortForward(hostPort: hp, guestPort: gp)
         appState.addPortForward(pf, toVm: vmId)
         dismiss()
+    }
+}
+
+struct SharedFoldersSheet: View {
+    let vmId: String
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    @State private var showAddSheet = false
+
+    private var vm: VmInfo? {
+        appState.vms.first(where: { $0.id == vmId })
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Shared Folders")
+                .font(.title3)
+                .fontWeight(.semibold)
+                .padding()
+
+            if let vm = vm {
+                if vm.sharedFolders.isEmpty {
+                    Text("No shared folders")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(vm.sharedFolders) { folder in
+                            HStack(spacing: 8) {
+                                Image(systemName: "folder")
+                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(folder.tag)
+                                        .fontWeight(.medium)
+                                    Text(folder.hostPath)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                Spacer()
+                                if folder.readonly {
+                                    Text("RO")
+                                        .font(.caption2)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(.quaternary)
+                                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                                }
+                                Button(role: .destructive) {
+                                    appState.removeSharedFolder(tag: folder.tag, fromVm: vmId)
+                                } label: {
+                                    Image(systemName: "minus.circle")
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button {
+                    showAddSheet = true
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+        }
+        .frame(width: 480, height: 400)
+        .sheet(isPresented: $showAddSheet) {
+            AddSharedFolderSheet(vmId: vmId)
+        }
+    }
+}
+
+struct PortForwardsSheet: View {
+    let vmId: String
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    @State private var showAddSheet = false
+
+    private var vm: VmInfo? {
+        appState.vms.first(where: { $0.id == vmId })
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Port Forwards")
+                .font(.title3)
+                .fontWeight(.semibold)
+                .padding()
+
+            if let vm = vm {
+                if vm.portForwards.isEmpty {
+                    Text("No port forwards")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(vm.portForwards) { pf in
+                            HStack(spacing: 8) {
+                                Image(systemName: "network")
+                                    .foregroundStyle(.secondary)
+                                Text(verbatim: "127.0.0.1:\(pf.hostPort)")
+                                    .fontWeight(.medium)
+                                Image(systemName: "arrow.right")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(verbatim: "guest:\(pf.guestPort)")
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button(role: .destructive) {
+                                    appState.removePortForward(hostPort: pf.hostPort, fromVm: vmId)
+                                } label: {
+                                    Image(systemName: "minus.circle")
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button {
+                    showAddSheet = true
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+        }
+        .frame(width: 420, height: 360)
+        .sheet(isPresented: $showAddSheet) {
+            AddPortForwardSheet(vmId: vmId)
+        }
     }
 }

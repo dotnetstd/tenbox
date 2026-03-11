@@ -7,6 +7,22 @@
 #include <atomic>
 #include <thread>
 #include <unistd.h>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
+
+static const bool kDebugIpcMessages = false;
+
+#define IPC_DEBUG_LOG(...) do { if (kDebugIpcMessages) NSLog(__VA_ARGS__); } while(0)
+
+static std::string GetTimestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    time_t time = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << std::put_time(std::localtime(&time), "%H:%M:%S") << "." << std::setfill('0') << std::setw(3) << ms.count();
+    return ss.str();
+}
 
 static std::string HexEncode(const std::string& input) {
     static const char hex[] = "0123456789abcdef";
@@ -70,7 +86,11 @@ static std::string HexDecode(const std::string& hex) {
         _connection->Close();
     }
     if (_recvThread.joinable()) {
-        _recvThread.join();
+        if (_recvThread.get_id() == std::this_thread::get_id()) {
+            _recvThread.detach();
+        } else {
+            _recvThread.join();
+        }
     }
     _connection.reset();
     _shmFb.Close();
@@ -92,7 +112,9 @@ static std::string HexDecode(const std::string& hex) {
     msg.fields["command"] = command.UTF8String;
 
     std::lock_guard<std::mutex> lock(_sendLock);
-    return _connection->Send(ipc::Encode(msg));
+    std::string encoded = ipc::Encode(msg);
+    IPC_DEBUG_LOG(@"[IPC] >> %s [%zu bytes] command=%s", GetTimestamp().c_str(), encoded.size(), command.UTF8String);
+    return _connection->Send(encoded);
 }
 
 #pragma mark - Send: Input
@@ -108,7 +130,9 @@ static std::string HexDecode(const std::string& hex) {
     msg.fields["pressed"] = pressed ? "1" : "0";
 
     std::lock_guard<std::mutex> lock(_sendLock);
-    return _connection->Send(ipc::Encode(msg));
+    std::string encoded = ipc::Encode(msg);
+    IPC_DEBUG_LOG(@"[IPC] >> %s [%zu bytes] key_code=%u pressed=%d", GetTimestamp().c_str(), encoded.size(), code, pressed);
+    return _connection->Send(encoded);
 }
 
 - (BOOL)sendPointerAbsolute:(int32_t)x y:(int32_t)y buttons:(uint32_t)buttons {
@@ -123,7 +147,9 @@ static std::string HexDecode(const std::string& hex) {
     msg.fields["buttons"] = std::to_string(buttons);
 
     std::lock_guard<std::mutex> lock(_sendLock);
-    return _connection->Send(ipc::Encode(msg));
+    std::string encoded = ipc::Encode(msg);
+    IPC_DEBUG_LOG(@"[IPC] >> %s [%zu bytes] pointer x=%d y=%d buttons=%u", GetTimestamp().c_str(), encoded.size(), x, y, buttons);
+    return _connection->Send(encoded);
 }
 
 - (BOOL)sendScrollEvent:(int32_t)delta {
@@ -136,7 +162,9 @@ static std::string HexDecode(const std::string& hex) {
     msg.fields["delta"] = std::to_string(delta);
 
     std::lock_guard<std::mutex> lock(_sendLock);
-    return _connection->Send(ipc::Encode(msg));
+    std::string encoded = ipc::Encode(msg);
+    IPC_DEBUG_LOG(@"[IPC] >> %s [%zu bytes] wheel delta=%d", GetTimestamp().c_str(), encoded.size(), delta);
+    return _connection->Send(encoded);
 }
 
 #pragma mark - Send: Console
@@ -152,7 +180,9 @@ static std::string HexDecode(const std::string& hex) {
     msg.fields["data_hex"] = HexEncode(raw);
 
     std::lock_guard<std::mutex> lock(_sendLock);
-    return _connection->Send(ipc::Encode(msg));
+    std::string encoded = ipc::Encode(msg);
+    IPC_DEBUG_LOG(@"[IPC] >> %s [%zu bytes] console_input len=%zu", GetTimestamp().c_str(), encoded.size(), raw.size());
+    return _connection->Send(encoded);
 }
 
 #pragma mark - Send: VM Configuration Updates
@@ -223,7 +253,9 @@ static std::string HexDecode(const std::string& hex) {
     msg.fields["types"] = typesStr;
 
     std::lock_guard<std::mutex> lock(_sendLock);
-    return _connection->Send(ipc::Encode(msg));
+    std::string encoded = ipc::Encode(msg);
+    IPC_DEBUG_LOG(@"[IPC] >> %s [%zu bytes] clipboard.grab types=%s", GetTimestamp().c_str(), encoded.size(), typesStr.c_str());
+    return _connection->Send(encoded);
 }
 
 - (BOOL)sendClipboardData:(uint32_t)dataType payload:(NSData *)payload {
@@ -242,7 +274,9 @@ static std::string HexDecode(const std::string& hex) {
     }
 
     std::lock_guard<std::mutex> lock(_sendLock);
-    return _connection->Send(ipc::Encode(msg));
+    std::string encoded = ipc::Encode(msg);
+    IPC_DEBUG_LOG(@"[IPC] >> %s [%zu bytes] clipboard.data type=%u payload=%zu", GetTimestamp().c_str(), encoded.size(), dataType, payload.length);
+    return _connection->Send(encoded);
 }
 
 - (BOOL)sendClipboardRequest:(uint32_t)dataType {
@@ -255,7 +289,9 @@ static std::string HexDecode(const std::string& hex) {
     msg.fields["data_type"] = std::to_string(dataType);
 
     std::lock_guard<std::mutex> lock(_sendLock);
-    return _connection->Send(ipc::Encode(msg));
+    std::string encoded = ipc::Encode(msg);
+    IPC_DEBUG_LOG(@"[IPC] >> %s [%zu bytes] clipboard.request type=%u", GetTimestamp().c_str(), encoded.size(), dataType);
+    return _connection->Send(encoded);
 }
 
 - (BOOL)sendClipboardRelease {
@@ -267,7 +303,9 @@ static std::string HexDecode(const std::string& hex) {
     msg.type = "clipboard.release";
 
     std::lock_guard<std::mutex> lock(_sendLock);
-    return _connection->Send(ipc::Encode(msg));
+    std::string encoded = ipc::Encode(msg);
+    IPC_DEBUG_LOG(@"[IPC] >> %s [%zu bytes] clipboard.release", GetTimestamp().c_str(), encoded.size());
+    return _connection->Send(encoded);
 }
 
 #pragma mark - Receive Loop
@@ -364,6 +402,7 @@ static std::string HexDecode(const std::string& hex) {
                 if (n < 0 && errno == EINTR) continue;
                 break;
             }
+            IPC_DEBUG_LOG(@"[IPC] << %s [%zd bytes] received", GetTimestamp().c_str(), n);
             pending.append(readbuf, static_cast<size_t>(n));
             dispatchMessages();
         }
@@ -397,9 +436,10 @@ static std::string HexDecode(const std::string& hex) {
         uint32_t w = getU32("width");
         uint32_t h = getU32("height");
         if (w == 0 || h == 0) return;
+        IPC_DEBUG_LOG(@"[IPC] << %s display.shm_init %ux%u", GetTimestamp().c_str(), w, h);
         _shmFb.Close();
         if (!_shmFb.Open(ni->second, w, h)) {
-            NSLog(@"[IPC] failed to open shared framebuffer: %s %ux%u",
+            IPC_DEBUG_LOG(@"[IPC] failed to open shared framebuffer: %s %ux%u",
                   ni->second.c_str(), w, h);
         }
     }
@@ -415,6 +455,8 @@ static std::string HexDecode(const std::string& hex) {
         if (resH == 0) resH = h;
         if (w == 0 || h == 0 || stride == 0) return;
         if (!_shmFb.IsValid() || _shmFb.width() != resW || _shmFb.height() != resH) return;
+
+        IPC_DEBUG_LOG(@"[IPC] << %s display.frame_ready %ux%u [%u,%u]", GetTimestamp().c_str(), w, h, dirtyX, dirtyY);
 
         // Zero-copy: wrap SHM pointer directly into NSData.
         // Point to the first row of the dirty rect; pass the full SHM stride
@@ -443,6 +485,8 @@ static std::string HexDecode(const std::string& hex) {
         if (resH == 0) resH = h;
         if (w == 0 || h == 0 || stride == 0 || msg.payload.empty()) return;
 
+        IPC_DEBUG_LOG(@"[IPC] << %s display.frame %ux%u [%zu bytes payload]", GetTimestamp().c_str(), w, h, msg.payload.size());
+
         NSData* pixels = [NSData dataWithBytesNoCopy:(void*)msg.payload.data()
                                               length:msg.payload.size()
                                         freeWhenDone:NO];
@@ -455,6 +499,7 @@ static std::string HexDecode(const std::string& hex) {
         uint32_t h = getU32("height");
         uint32_t hotX = getU32("hot_x");
         uint32_t hotY = getU32("hot_y");
+        IPC_DEBUG_LOG(@"[IPC] << %s display.cursor visible=%d updated=%d %ux%u", GetTimestamp().c_str(), visible, imageUpdated, w, h);
         NSData* pixels = nil;
         if (imageUpdated && !msg.payload.empty()) {
             pixels = [NSData dataWithBytes:msg.payload.data()
@@ -471,6 +516,7 @@ static std::string HexDecode(const std::string& hex) {
         auto ci = msg.fields.find("channels");
         if (ri != msg.fields.end()) rate = std::stoul(ri->second);
         if (ci != msg.fields.end()) channels = static_cast<uint16_t>(std::stoul(ci->second));
+        IPC_DEBUG_LOG(@"[IPC] << %s audio.pcm [%zu bytes] rate=%u ch=%u", GetTimestamp().c_str(), msg.payload.size(), rate, channels);
         NSData* pcm = [NSData dataWithBytes:msg.payload.data()
                                      length:msg.payload.size()];
         ah(pcm, rate, channels);
@@ -479,6 +525,7 @@ static std::string HexDecode(const std::string& hex) {
         auto di = msg.fields.find("data_hex");
         if (di != msg.fields.end()) {
             std::string raw = HexDecode(di->second);
+            IPC_DEBUG_LOG(@"[IPC] << %s console.data [%zu bytes]", GetTimestamp().c_str(), raw.size());
             NSString* text = [[NSString alloc] initWithBytes:raw.data()
                                                       length:raw.size()
                                                     encoding:NSUTF8StringEncoding];
@@ -513,6 +560,7 @@ static std::string HexDecode(const std::string& hex) {
     else if (msg.type == "clipboard.grab") {
         auto ti = msg.fields.find("types");
         if (ti != msg.fields.end()) {
+            IPC_DEBUG_LOG(@"[IPC] << %s clipboard.grab types=%s", GetTimestamp().c_str(), ti->second.c_str());
             NSMutableArray<NSNumber *>* types = [NSMutableArray array];
             std::string typesStr = ti->second;
             size_t pos = 0;
@@ -533,6 +581,7 @@ static std::string HexDecode(const std::string& hex) {
         auto dti = msg.fields.find("data_type");
         if (dti != msg.fields.end())
             dataType = static_cast<uint32_t>(std::strtoul(dti->second.c_str(), nullptr, 10));
+        IPC_DEBUG_LOG(@"[IPC] << %s clipboard.data type=%u [%zu bytes]", GetTimestamp().c_str(), dataType, msg.payload.size());
         NSData* payload = [NSData dataWithBytes:msg.payload.data() length:msg.payload.size()];
         dispatch_async(dispatch_get_main_queue(), ^{ cdH(dataType, payload); });
     }
@@ -541,11 +590,13 @@ static std::string HexDecode(const std::string& hex) {
         auto dti = msg.fields.find("data_type");
         if (dti != msg.fields.end())
             dataType = static_cast<uint32_t>(std::strtoul(dti->second.c_str(), nullptr, 10));
+        IPC_DEBUG_LOG(@"[IPC] << %s clipboard.request type=%u", GetTimestamp().c_str(), dataType);
         dispatch_async(dispatch_get_main_queue(), ^{ crH(dataType); });
     }
     else if (msg.type == "runtime.state") {
         auto si = msg.fields.find("state");
         if (si != msg.fields.end()) {
+            IPC_DEBUG_LOG(@"[IPC] << %s runtime.state %s", GetTimestamp().c_str(), si->second.c_str());
             NSString* state = [NSString stringWithUTF8String:si->second.c_str()];
             dispatch_async(dispatch_get_main_queue(), ^{ rsH(state); });
         }
@@ -553,6 +604,7 @@ static std::string HexDecode(const std::string& hex) {
     else if (msg.type == "guest_agent.state") {
         auto ci = msg.fields.find("connected");
         BOOL connected = (ci != msg.fields.end() && ci->second == "1");
+        IPC_DEBUG_LOG(@"[IPC] << %s guest_agent.state connected=%d", GetTimestamp().c_str(), connected);
         dispatch_async(dispatch_get_main_queue(), ^{ gaH(connected); });
     }
     else if (msg.type == "display.state") {
@@ -562,6 +614,7 @@ static std::string HexDecode(const std::string& hex) {
         BOOL active = (ai != msg.fields.end() && ai->second == "1");
         uint32_t w = (wi != msg.fields.end()) ? std::stoul(wi->second) : 0;
         uint32_t h = (hi != msg.fields.end()) ? std::stoul(hi->second) : 0;
+        IPC_DEBUG_LOG(@"[IPC] << %s display.state active=%d %ux%u", GetTimestamp().c_str(), active, w, h);
         dispatch_async(dispatch_get_main_queue(), ^{ dsH(active, w, h); });
     }
 }
@@ -572,7 +625,11 @@ static std::string HexDecode(const std::string& hex) {
         _connection->Close();
     }
     if (_recvThread.joinable()) {
-        _recvThread.join();
+        if (_recvThread.get_id() == std::this_thread::get_id()) {
+            _recvThread.detach();
+        } else {
+            _recvThread.join();
+        }
     }
 }
 

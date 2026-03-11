@@ -11,17 +11,13 @@ using UiShell = Win32UiShell;
 #include <shellapi.h>
 #include <shlobj.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 #include <filesystem>
 #include <ctime>
 #include <io.h>
-
-extern "C" {
-extern int __argc;
-extern char** __argv;
-}
 
 static FILE* g_log_file = nullptr;
 

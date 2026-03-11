@@ -7,6 +7,9 @@
 
 #ifdef _WIN32
 #define NOMINMAX
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 using FsHandle = HANDLE;
 #define FS_INVALID_HANDLE INVALID_HANDLE_VALUE

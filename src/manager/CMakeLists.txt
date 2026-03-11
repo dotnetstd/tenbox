@@ -33,6 +33,7 @@ target_include_directories(tenbox-manager
 target_link_libraries(tenbox-manager
     PRIVATE
         tenbox_ipc
+        uv_a
         nlohmann_json::nlohmann_json
         shell32
         advapi32

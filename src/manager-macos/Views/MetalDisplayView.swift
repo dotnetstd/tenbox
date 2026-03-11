@@ -13,6 +13,8 @@ class MetalDisplayRenderer: NSObject, MTKViewDelegate {
     private var textureWidth: Int = 0
     private var textureHeight: Int = 0
     private let textureLock = NSLock()
+    
+    weak var view: MTKView?
 
     private init(device: MTLDevice, queue: MTLCommandQueue, pipeline: MTLRenderPipelineState) {
         self.device = device
@@ -124,6 +126,10 @@ class MetalDisplayRenderer: NSObject, MTKViewDelegate {
             withBytes: pixels,
             bytesPerRow: srcStride
         )
+        
+        DispatchQueue.main.async { [weak self] in
+            self?.view?.needsDisplay = true
+        }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}

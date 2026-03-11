@@ -1,28 +1,28 @@
 {
-  "latest_version": "0.3.3",
+  "latest_version": "0.4.1",
   "min_supported_version": "0.1.0",
-  "release_notes": "版本号更改为 0.3.3\n更新内容详见 GitHub",
-  "release_date": "2026-03-09",
-  "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.3.3.msi",
-  "sha256": "31dbac0707770cefe87be063875c96493f0d36b664f509f138168d1d7d7abf35",
+  "release_notes": "重构创建虚拟机的镜像列表\n基于事件驱动的通信优化性能\n动态调整 DNS",
+  "release_date": "2026-03-11",
+  "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.4.1.msi",
+  "sha256": "d3bea25533229b374f65aeae218028c58fefe1000a332ae6ca457283f24f2365",
   "platforms": {
     "windows": {
-      "latest_version": "0.3.3",
-      "release_notes": "版本号更改为 0.3.3\n更新内容详见 GitHub",
-      "release_date": "2026-03-09",
-      "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.3.3.msi",
-      "sha256": "31dbac0707770cefe87be063875c96493f0d36b664f509f138168d1d7d7abf35",
-      "size": 1994752,
+      "latest_version": "0.4.1",
+      "release_notes": "重构创建虚拟机的镜像列表\n基于事件驱动的通信优化性能\n动态调整 DNS",
+      "release_date": "2026-03-11",
+      "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.4.1.msi",
+      "sha256": "d3bea25533229b374f65aeae218028c58fefe1000a332ae6ca457283f24f2365",
+      "size": 2142208,
       "min_os": "Windows 10"
     },
     "macos": {
-      "latest_version": "0.3.4",
-      "release_notes": "虚拟机支持捕获 command 等快捷键，方便使用 command + space 切换输入法。",
-      "release_date": "2026-03-10",
-      "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.3.4_arm64.dmg",
-      "sha256": "a01b305a270d3d4b36c06f110df7352c204029fe143e3028385a52f14c73c625",
-      "size": 3069347,
-      "min_os": "macOS 13.0"
+      "latest_version": "0.4.1",
+      "release_notes": "基于事件的通信优化性能\n调整共享文件夹与端口转发的位置",
+      "release_date": "2026-03-11",
+      "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.4.1_arm64.dmg",
+      "sha256": "febee6abe7ca328b3a1cedc54c51eaa1d603a911a0a2abced18b7946ac73e30a",
+      "size": 3158872,
+      "min_os": "macOS 15.0"
     }
   }
 }

@@ -377,25 +377,28 @@ class CreateVmViewModel: ObservableObject {
         isLoadingSources = true
         errorMessage = ""
 
-        Task {
-            do {
-                let fetched = try await service.fetchSources()
-                sources = fetched
-                if !fetched.isEmpty && selectedSourceIndex < 0 {
-                    selectedSourceIndex = 0
-                    fetchOnlineImages()
+        let fetched = service.effectiveSources()
+        sources = fetched
+        if !fetched.isEmpty && selectedSourceIndex < 0 {
+            var defaultIndex = 0
+            if let last = service.lastSelectedSource {
+                if let idx = fetched.firstIndex(where: { $0.name == last }) {
+                    defaultIndex = idx
                 }
-            } catch {
-                errorMessage = "Failed to load sources: \(error.localizedDescription)"
             }
-            isLoadingSources = false
+            selectedSourceIndex = defaultIndex
+            fetchOnlineImages()
         }
+        isLoadingSources = false
     }
 
     func onSourceChanged() {
         onlineImages = []
         selectedImageId = nil
         errorMessage = ""
+        if selectedSourceIndex >= 0, selectedSourceIndex < sources.count {
+            service.lastSelectedSource = sources[selectedSourceIndex].name
+        }
         fetchOnlineImages()
     }
 
@@ -677,21 +680,6 @@ struct EditVmDialog: View {
                     Stepper("CPUs: \(cpuCount)", value: $cpuCount, in: 1...hostMaxCpus)
                     Stepper("Memory: \(memoryGb) GB", value: $memoryGb, in: 1...hostMaxMemoryGb)
                 }
-
-                Section("Paths (read-only)") {
-                    LabeledContent("Kernel") {
-                        Text(vm.kernelPath)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .foregroundStyle(.secondary)
-                    }
-                    LabeledContent("Disk") {
-                        Text(vm.diskPath.isEmpty ? "None" : vm.diskPath)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .foregroundStyle(.secondary)
-                    }
-                }
             }
             .formStyle(.grouped)
             .padding(.horizontal)
@@ -706,7 +694,7 @@ struct EditVmDialog: View {
             }
             .padding()
         }
-        .frame(width: 450, height: 380)
+        .frame(width: 450, height: 300)
     }
 
     private func saveVm() {

@@ -92,6 +92,16 @@ endif()
 
 configure_file(src/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/version.h)
 
+# libuv — cross-platform event loop for async I/O
+FetchContent_Declare(
+    libuv
+    GIT_REPOSITORY https://github.com/libuv/libuv.git
+    GIT_TAG        v1.49.2
+)
+set(LIBUV_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(libuv)
+
 # nlohmann/json — JSON for Modern C++
 FetchContent_Declare(
     json

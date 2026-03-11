@@ -8,6 +8,7 @@
 // MSVC struct packing handled via bpstruct.h / epstruct.h
 #ifdef _MSC_VER
 #define PACK_STRUCT_USE_INCLUDES
+#define LWIP_NO_UNISTD_H 1
 #endif
 
 #define LWIP_PLATFORM_DIAG(x)   do { printf x; } while(0)

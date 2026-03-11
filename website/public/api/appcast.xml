@@ -6,20 +6,21 @@
     <description>TenBox macOS Updates</description>
     <language>zh-CN</language>
     <item>
-      <title>Version 0.3.4</title>
+      <title>Version 0.4.1</title>
       <description><![CDATA[
         <ul>
-          <li>虚拟机支持捕获 command 等快捷键，方便使用 command + space 切换输入法。</li>
+          <li>基于事件的通信优化性能</li>
+          <li>调整共享文件夹与端口转发的位置</li>
         </ul>
       ]]></description>
-      <pubDate>Tue, 10 Mar 2026 00:00:00 -0000</pubDate>
-      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 11 Mar 2026 00:00:00 -0000</pubDate>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
       <enclosure
-        url="https://files.xiaozhi.me/tenbox/releases/TenBox_0.3.4_arm64.zip"
-        sparkle:version="0.3.4"
-        sparkle:shortVersionString="0.3.4"
-        sparkle:edSignature="DzvsCeCbem7vZi1/IIE4I+hMZzrJvpXV0zpru3fnUYhuSkbJZoDsMCLraUyIg7kQ2vJOijEyBuwCSs4JhnH6Bw=="
-        length="3140080"
+        url="https://files.xiaozhi.me/tenbox/releases/TenBox_0.4.1_arm64.zip"
+        sparkle:version="0.4.1"
+        sparkle:shortVersionString="0.4.1"
+        sparkle:edSignature="pb8O68XTvRMAPU1YZ6RRHnttZVanGmNm/v4PlS0ZfC9x1KZNejMzieGKwe09B2k+V3axhasMjyH5bnva9wlWCg=="
+        length="3217605"
         type="application/octet-stream"
       />
     </item>

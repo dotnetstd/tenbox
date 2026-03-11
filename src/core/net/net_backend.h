@@ -1,6 +1,9 @@
 #pragma once
 
 #include "common/vm_model.h"
+#include "core/net/poll_handle.h"
+
+#include <uv.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -61,8 +64,7 @@ private:
 
     void RewriteAndFeed(uint8_t* frame, uint32_t len, NatEntry* entry);
 
-    // TCP NAT callbacks (static so they can be registered with lwIP)
-    static void* AsTcpArg(NatEntry* e);
+    // TCP NAT callbacks
     void OnTcpAccepted(NatEntry* entry, void* new_pcb);
     void OnTcpRecv(NatEntry* entry, void* pcb, void* p);
     void OnTcpErr(NatEntry* entry);
@@ -70,23 +72,58 @@ private:
     // UDP NAT
     void OnUdpRecv(NatEntry* entry, void* pcb, void* p);
 
-    // Winsock polling
-    bool PollSockets();
+    // Socket I/O handlers
     void HandleTcpReadable(NatEntry* entry);
     void HandleUdpReadable(NatEntry* entry);
     void DrainTcpToGuest(NatEntry* entry);
     void DrainTcpToHost(NatEntry* entry);
+    void UpdateNatPoll(NatEntry* entry);
+    void OnNatPollEvent(NatEntry* entry, int status, int events);
+
+    // Consolidated teardown helpers (NatEntry only; TeardownPfConn declared after PfEntry)
+    void CloseHostSocket(NatEntry* e);
+    void DetachAndCloseLwipPcb(NatEntry* e);
+    void TeardownNatEntry(NatEntry* e);
+
+    // DNS relay (gateway acts as DNS proxy, forwarding to host's current nameserver)
+    void HandleDnsQuery(const uint8_t* frame, uint32_t len,
+                        uint32_t ip_hdr_len, uint16_t src_port);
+    void HandleDnsReadable(uintptr_t sock, uint16_t guest_src_port);
+    static uint32_t GetHostDnsServer();
+
+    struct DnsSession {
+        NetBackend* backend = nullptr;
+        uintptr_t host_socket = ~(uintptr_t)0;
+        uint16_t guest_src_port = 0;
+        PollHandle poll;
+        uint64_t created_ms = 0;
+    };
+    std::vector<std::unique_ptr<DnsSession>> dns_sessions_;
 
     // ICMP relay
     void HandleIcmpOut(uint32_t src_ip, uint32_t dst_ip,
                        const uint8_t* icmp_data, uint32_t icmp_len);
-    void PollIcmpSocket();
+#ifdef _WIN32
+    void IcmpWorkerThread();
+    struct IcmpRequest {
+        uint32_t src_ip;
+        uint32_t dst_ip;
+        std::vector<uint8_t> icmp_data;
+    };
+    std::mutex icmp_mutex_;
+    std::vector<IcmpRequest> icmp_queue_;
+    std::condition_variable icmp_cv_;
+    std::thread icmp_thread_;
+    std::atomic<bool> icmp_running_{false};
+    void* icmp_handle_ = nullptr;   // HANDLE from IcmpCreateFile
+#else
+    void HandleIcmpReadable();
     uintptr_t icmp_socket_ = ~(uintptr_t)0;
+    uv_poll_t icmp_poll_{};
+    bool icmp_poll_active_ = false;
+#endif
 
-    // Port forwarding
-    struct PfEntry;
-    std::vector<uint16_t> SetupPortForwards();  // returns failed host ports
-    void PollPortForwards();
+    std::vector<uint16_t> SetupPortForwards();
 
     VirtioNetDevice* virtio_net_ = nullptr;
     std::function<void()> irq_callback_;
@@ -106,53 +143,85 @@ private:
     std::vector<void*> deferred_listen_close_;
 
     // NAT table
+    enum class NatState : uint8_t {
+        Listening,    // TCP: listen_pcb active, waiting for guest SYN
+        Connecting,   // TCP: guest accepted, host socket connecting
+        Established,  // Both sides connected (TCP) or active (UDP)
+        HalfClosed,   // One side done, draining residual data
+        Closed        // All resources released, pending cleanup removal
+    };
     struct NatEntry {
+        NetBackend* backend = nullptr;
         uint8_t  proto;
         uint32_t guest_ip;
         uint16_t guest_port;
         uint32_t real_dst_ip;
         uint16_t real_dst_port;
         uint16_t proxy_port;
+        NatState state = NatState::Established;
         void*    listen_pcb = nullptr;
         void*    conn_pcb   = nullptr;
         uintptr_t host_socket = ~(uintptr_t)0;
-        bool     connecting  = false;
-        std::vector<uint8_t> pending_data;
+        std::vector<uint8_t> pending_data;     // buffered during Connecting
         std::vector<uint8_t> pending_to_guest;
-        std::vector<uint8_t> pending_to_host;  // buffered data from guest waiting to send to host
+        std::vector<uint8_t> pending_to_host;
         uint64_t last_active_ms = 0;
-        bool     closed = false; // both sides done, pending removal
+        PollHandle poll;
     };
     std::vector<std::unique_ptr<NatEntry>> nat_entries_;
     uint16_t next_proxy_port_ = 10000;
 
     // Port forwarding
     struct PfEntry {
+        NetBackend* backend = nullptr;
         uint16_t host_port;
         uint16_t guest_port;
         uintptr_t listener = ~(uintptr_t)0;
+        PollHandle listener_poll;
         struct Conn {
+            NetBackend* backend = nullptr;
             uintptr_t host_sock = ~(uintptr_t)0;
             void*     guest_pcb = nullptr;
             bool      guest_connected = false;
             std::vector<uint8_t> pending_to_guest;
             std::vector<uint8_t> pending_to_host;
+            PollHandle poll;
         };
         std::list<Conn> conns;
     };
-    std::vector<PfEntry> port_forwards_;
+    // PfEntry addresses are used as libuv callback data, so storage must stay stable.
+    std::list<PfEntry> port_forwards_;
+    void TeardownPfConn(PfEntry::Conn& c);
     void DrainPfToGuest(PfEntry::Conn& conn);
     void DrainPfToHost(PfEntry::Conn& conn);
+    void UpdatePfConnPoll(PfEntry::Conn& conn);
+    void OnPfConnPollEvent(PfEntry::Conn* conn, int status, int events);
+    void OnPfListenerReadable(PfEntry* pf);
     void TeardownPortForwards();
     void CheckPendingUpdates();
 
     std::atomic<bool> link_up_{true};
 
+    // libuv event loop (owned by net_thread_)
+    uv_loop_t loop_{};
+    uv_timer_t lwip_timer_{};
+    uv_timer_t cleanup_timer_{};
+    uv_async_t tx_wakeup_{};
+    uv_async_t pf_update_wakeup_{};
+    uv_async_t stop_wakeup_{};
+
+    static void OnLwipTimer(uv_timer_t* handle);
+    static void OnCleanupTimer(uv_timer_t* handle);
+    static void OnTxReady(uv_async_t* handle);
+    static void OnPfUpdateReady(uv_async_t* handle);
+    static void OnStopSignal(uv_async_t* handle);
+    void RescheduleLwipTimer();
+
     std::mutex pf_update_mutex_;
     std::optional<std::vector<PortForward>> pending_pf_update_;
-    bool pf_update_sync_ = false;  // true if caller is waiting for result
+    bool pf_update_sync_ = false;
     std::condition_variable pf_update_cv_;
-    std::vector<uint16_t> pf_update_failed_ports_;  // result: ports that failed to bind
+    std::vector<uint16_t> pf_update_failed_ports_;
 
 public:
     // Network addresses (public for use by lwIP callbacks)

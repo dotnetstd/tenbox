@@ -52,6 +52,16 @@ final class KeyboardCaptureManager {
         mode != .fullCapture
     }
 
+    /// Called by the NSView when it receives a keyboard event while in fullCapture mode.
+    /// If the event tap were truly intercepting, the NSView would never see the event.
+    /// This means the tap is silently broken (common with non-bundled debug builds),
+    /// so we fall back to localOnly processing.
+    func demoteToLocalOnlyIfNeeded() {
+        guard mode == .fullCapture else { return }
+        uninstallEventTap()
+        mode = .localOnly
+    }
+
     func beginCapture() {
         guard mode == .inactive else { return }
         if installEventTap() {

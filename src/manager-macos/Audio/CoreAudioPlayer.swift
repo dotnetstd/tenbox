@@ -22,6 +22,14 @@ class CoreAudioPlayer {
     private var audioRunLoop: CFRunLoop?
     private let runLoopReady = DispatchSemaphore(value: 0)
 
+    private var queueStopped = false
+    private var emptyBufferCount = 0
+    private let emptyBufferThreshold = 3
+
+    // Signalled to wake the audio thread when it should rebuild the queue
+    private let wakeUp = DispatchSemaphore(value: 0)
+    private var needsReconfigure = false
+
     func start() {
         guard !isRunning else { return }
         isRunning = true
@@ -31,6 +39,7 @@ class CoreAudioPlayer {
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        wakeUp.signal()
         stopAudioThread()
     }
 
@@ -39,11 +48,12 @@ class CoreAudioPlayer {
         let ch = UInt32(channels)
 
         dataLock.lock()
-        let needsReconfigure = (rate != currentSampleRate || ch != currentChannelCount)
-        if needsReconfigure {
+        let reconfigure = (rate != currentSampleRate || ch != currentChannelCount)
+        if reconfigure {
             currentSampleRate = rate
             currentChannelCount = ch
             pendingData.removeAll(keepingCapacity: true)
+            needsReconfigure = true
         }
 
         pendingData.append(data)
@@ -53,10 +63,11 @@ class CoreAudioPlayer {
             let excess = pendingData.count - maxPendingBytes
             pendingData.removeFirst(excess)
         }
+        let stopped = queueStopped
         dataLock.unlock()
 
-        if needsReconfigure {
-            reconfigureQueue()
+        if stopped || reconfigure {
+            wakeUp.signal()
         }
     }
 
@@ -68,19 +79,33 @@ class CoreAudioPlayer {
             self.audioRunLoop = CFRunLoopGetCurrent()
             self.runLoopReady.signal()
 
-            self.setupQueue()
-
             while self.isRunning {
-                CFRunLoopRunInMode(.defaultMode, 0.25, true)
-            }
+                self.setupQueue()
+                self.runAudioLoop()
+                self.teardownQueue()
 
-            self.teardownQueue()
+                // Sleep until new data arrives or we're told to stop
+                if self.isRunning {
+                    self.wakeUp.wait()
+                }
+            }
         }
         thread.name = "CoreAudioPlayer"
         thread.qualityOfService = .userInteractive
         self.audioThread = thread
         thread.start()
         runLoopReady.wait()
+    }
+
+    // Spin the RunLoop while AudioQueue is active
+    private func runAudioLoop() {
+        while self.isRunning && !self.queueStopped {
+            dataLock.lock()
+            let recfg = needsReconfigure
+            dataLock.unlock()
+            if recfg { break }
+            CFRunLoopRunInMode(.defaultMode, 0.25, true)
+        }
     }
 
     private func stopAudioThread() {
@@ -97,6 +122,9 @@ class CoreAudioPlayer {
         dataLock.lock()
         let rate = currentSampleRate
         let ch = currentChannelCount
+        needsReconfigure = false
+        queueStopped = false
+        emptyBufferCount = 0
         dataLock.unlock()
 
         var format = AudioStreamBasicDescription(
@@ -151,20 +179,33 @@ class CoreAudioPlayer {
         buffers = []
     }
 
-    private func reconfigureQueue() {
-        guard let rl = audioRunLoop else { return }
-        CFRunLoopPerformBlock(rl, CFRunLoopMode.defaultMode as CFTypeRef) { [weak self] in
-            guard let self = self else { return }
-            self.teardownQueue()
-            self.setupQueue()
-        }
-        CFRunLoopWakeUp(rl)
-    }
-
     // MARK: - Buffer filling
 
     fileprivate func fillNextBuffer(_ buffer: AudioQueueBufferRef) {
-        fillBuffer(buffer)
+        guard let q = audioQueue else { return }
+
+        dataLock.lock()
+        let hasData = !pendingData.isEmpty
+        dataLock.unlock()
+
+        if hasData {
+            emptyBufferCount = 0
+            fillBuffer(buffer)
+            AudioQueueEnqueueBuffer(q, buffer, 0, nil)
+        } else {
+            emptyBufferCount += 1
+            if emptyBufferCount >= emptyBufferThreshold && !queueStopped {
+                // Mark stopped — runAudioLoop will exit, teardown the queue,
+                // and the thread will sleep on the semaphore.
+                dataLock.lock()
+                queueStopped = true
+                dataLock.unlock()
+            } else {
+                memset(buffer.pointee.mAudioData, 0, Int(bufferSize))
+                buffer.pointee.mAudioDataByteSize = bufferSize
+                AudioQueueEnqueueBuffer(q, buffer, 0, nil)
+            }
+        }
     }
 
     private func fillBuffer(_ buffer: AudioQueueBufferRef) {
@@ -199,5 +240,4 @@ private func audioQueueCallback(
     guard let userData = userData else { return }
     let player = Unmanaged<CoreAudioPlayer>.fromOpaque(userData).takeUnretainedValue()
     player.fillNextBuffer(buffer)
-    AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
 }

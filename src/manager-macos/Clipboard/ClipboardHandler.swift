@@ -7,17 +7,43 @@ import AppKit
 class ClipboardHandler {
     private var pollingTimer: Timer?
     private var lastChangeCount: Int = 0
+    private var appObservers: [NSObjectProtocol] = []
 
     var onHostClipboardChanged: ((Data, String) -> Void)?
 
     func startMonitoring() {
         lastChangeCount = NSPasteboard.general.changeCount
-        pollingTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        startTimer()
+
+        let nc = NotificationCenter.default
+        appObservers.append(nc.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.startTimer()
+        })
+        appObservers.append(nc.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.stopTimer()
+        })
+    }
+
+    func stopMonitoring() {
+        stopTimer()
+        let nc = NotificationCenter.default
+        for obs in appObservers { nc.removeObserver(obs) }
+        appObservers.removeAll()
+    }
+
+    private     func startTimer() {
+        guard pollingTimer == nil else { return }
+        lastChangeCount = NSPasteboard.general.changeCount
+        pollingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.checkForChanges()
         }
     }
 
-    func stopMonitoring() {
+    private func stopTimer() {
         pollingTimer?.invalidate()
         pollingTimer = nil
     }

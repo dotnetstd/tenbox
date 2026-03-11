@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-private let kSourcesUrl = "https://tenbox.ai/api/sources.json"
+private let kLastSelectedSourceKey = "lastSelectedSource"
 
 class ImageSourceService: ObservableObject {
     static let shared = ImageSourceService()
@@ -23,16 +23,47 @@ class ImageSourceService: ObservableObject {
         return dir
     }
 
-    // MARK: - Fetch sources & images
-
-    func fetchSources() async throws -> [ImageSource] {
-        guard let url = URL(string: kSourcesUrl) else {
-            throw ImageSourceError.invalidUrl
-        }
-        let (data, _) = try await URLSession.shared.data(from: url)
-        let response = try JSONDecoder().decode(ImageSourcesResponse.self, from: data)
-        return response.sources
+    private var settingsPath: String {
+        appSupportDir + "/settings.json"
     }
+
+    // MARK: - Default & effective sources
+
+    static func defaultSources() -> [ImageSource] {
+        [
+            ImageSource(name: "China Mainland", url: "https://tenbox.ai/api/images.json"),
+        ]
+    }
+
+    func effectiveSources() -> [ImageSource] {
+        let configured = loadSourcesFromSettings()
+        return configured.isEmpty ? Self.defaultSources() : configured
+    }
+
+    private func loadSourcesFromSettings() -> [ImageSource] {
+        guard let data = fm.contents(atPath: settingsPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sourcesArray = json["sources"] as? [[String: Any]] else {
+            return []
+        }
+        var result: [ImageSource] = []
+        for item in sourcesArray {
+            guard let name = item["name"] as? String,
+                  let url = item["url"] as? String,
+                  !url.isEmpty else { continue }
+            result.append(ImageSource(name: name, url: url))
+        }
+        return result
+    }
+
+    // MARK: - Last selected source persistence
+
+    var lastSelectedSource: String? {
+        get { UserDefaults.standard.string(forKey: kLastSelectedSourceKey) }
+        set { UserDefaults.standard.set(newValue, forKey: kLastSelectedSourceKey) }
+    }
+
+    // MARK: - Fetch images
 
     func fetchImages(from sourceUrl: String) async throws -> [ImageEntry] {
         guard let url = URL(string: sourceUrl) else {

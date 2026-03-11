@@ -369,37 +369,44 @@ class InputMTKView: MTKView {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if self == window?.firstResponder,
-           captureManager?.isCaptureActive == true,
-           captureManager?.handlesKeyboardLocally == true {
-            if event.type == .keyDown {
-                inputHandler?.handleKeyDown(event)
-            }
-            return true
+        guard self == window?.firstResponder else {
+            return super.performKeyEquivalent(with: event)
         }
-        return super.performKeyEquivalent(with: event)
+        if let captureManager, captureManager.isCaptureActive {
+            if !captureManager.handlesKeyboardLocally {
+                captureManager.demoteToLocalOnlyIfNeeded()
+            }
+        }
+        if event.type == .keyDown {
+            inputHandler?.handleKeyDown(event)
+        }
+        return true
     }
 
     override func keyDown(with event: NSEvent) {
-        guard captureManager?.isCaptureActive == true else { return }
-        guard captureManager?.handlesKeyboardLocally == true else { return }
+        if let captureManager, captureManager.isCaptureActive, !captureManager.handlesKeyboardLocally {
+            captureManager.demoteToLocalOnlyIfNeeded()
+        }
         inputHandler?.handleKeyDown(event)
     }
 
     override func keyUp(with event: NSEvent) {
-        guard captureManager?.isCaptureActive == true else { return }
-        guard captureManager?.handlesKeyboardLocally == true else { return }
+        if let captureManager, captureManager.isCaptureActive, !captureManager.handlesKeyboardLocally {
+            captureManager.demoteToLocalOnlyIfNeeded()
+        }
         inputHandler?.handleKeyUp(event)
     }
 
     override func flagsChanged(with event: NSEvent) {
-        guard let captureManager else { return }
-        guard captureManager.isCaptureActive else { return }
-        if captureManager.isReleaseGesture(keyCode: event.keyCode, modifierFlags: event.modifierFlags) {
-            releaseCapturedInputs()
-            return
+        if let captureManager, captureManager.isCaptureActive {
+            if captureManager.isReleaseGesture(keyCode: event.keyCode, modifierFlags: event.modifierFlags) {
+                releaseCapturedInputs()
+                return
+            }
+            if !captureManager.handlesKeyboardLocally {
+                captureManager.demoteToLocalOnlyIfNeeded()
+            }
         }
-        guard captureManager.handlesKeyboardLocally else { return }
         inputHandler?.handleFlagsChanged(event)
     }
 
@@ -528,10 +535,10 @@ struct MetalDisplayViewWrapper: NSViewRepresentable {
         if let renderer = renderer {
             view.device = renderer.device
             view.colorPixelFormat = .bgra8Unorm
-            view.isPaused = false
-            view.enableSetNeedsDisplay = false
-            view.preferredFramesPerSecond = 60
+            view.isPaused = true
+            view.enableSetNeedsDisplay = true
             view.delegate = renderer
+            renderer.view = view
         }
         return view
     }
@@ -540,6 +547,7 @@ struct MetalDisplayViewWrapper: NSViewRepresentable {
         nsView.delegate = renderer
         nsView.inputHandler = inputHandler
         nsView.captureManager = captureManager
+        renderer?.view = nsView
         if nsView.customCursor !== guestCursor {
             nsView.updateCustomCursor(guestCursor)
         }

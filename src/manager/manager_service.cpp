@@ -111,25 +111,9 @@ ManagerService::ManagerService(std::string runtime_exe_path, std::string data_di
 ManagerService::~ManagerService() {
     ShutdownAll();
 
-    // Ensure all read threads are joined even if the VM is already stopped,
-    // because HandleProcessExit may have set the state to kStopped while
-    // the read thread is still finishing up.  A joinable std::thread that
-    // is destroyed calls std::terminate.
-    {
-        std::lock_guard<std::mutex> lock(vms_mutex_);
-        for (auto& [id, vm] : vms_) {
-            (void)id;
-            vm.runtime.read_running.store(false);
-            if (vm.runtime.pipe_handle) {
-                CancelIoEx(reinterpret_cast<HANDLE>(vm.runtime.pipe_handle), nullptr);
-            }
-        }
-    }
     for (auto& [id, vm] : vms_) {
         (void)id;
-        if (vm.runtime.read_thread.joinable()) {
-            vm.runtime.read_thread.join();
-        }
+        StopVmLoop(vm);
     }
 
     if (job_object_) {
@@ -307,15 +291,12 @@ bool ManagerService::CloneVm(const std::string& vm_id, std::string* error) {
 
 bool ManagerService::DeleteVm(const std::string& vm_id, std::string* error) {
     std::string vm_dir;
-    std::thread read_thread_to_join;
-    
-    // Step 1: Stop VM if running (this acquires lock internally)
+
     {
         std::string stop_err;
         StopVm(vm_id, &stop_err);
     }
 
-    // Step 2: Get VM directory and ensure read thread is stopped
     {
         std::lock_guard<std::mutex> lock(vms_mutex_);
         VmRecord* vm = FindVm(vm_id);
@@ -323,31 +304,13 @@ bool ManagerService::DeleteVm(const std::string& vm_id, std::string* error) {
             if (error) *error = "vm not found";
             return false;
         }
-        
+
         vm_dir = vm->spec.vm_dir;
-        
-        // Stop read thread if still running
-        if (vm->runtime.read_thread.joinable()) {
-            vm->runtime.read_running.store(false);
-            if (vm->runtime.pipe_handle) {
-                CancelIoEx(reinterpret_cast<HANDLE>(vm->runtime.pipe_handle), nullptr);
-            }
-            // Move thread out to join outside the lock
-            read_thread_to_join = std::move(vm->runtime.read_thread);
-        }
-        
-        // Erase VM record
         EraseVm(vm_id);
-    }
-    
-    // Step 3: Join read thread outside the lock (if needed)
-    if (read_thread_to_join.joinable()) {
-        read_thread_to_join.join();
     }
 
     SaveVmPaths();
 
-    // Step 4: Delete VM directory
     if (!vm_dir.empty()) {
         std::error_code ec;
         fs::remove_all(vm_dir, ec);
@@ -434,6 +397,9 @@ bool ManagerService::StartVm(const std::string& vm_id, std::string* error) {
 
     VmSpec spec_copy;
     std::string pipe_name;
+
+    // StopVmLoop joins the loop thread which may acquire vms_mutex_ in its
+    // callbacks, so it must be called outside the lock to avoid deadlock.
     {
         std::lock_guard<std::mutex> lock(vms_mutex_);
         VmRecord* vmp = FindVm(vm_id);
@@ -444,19 +410,48 @@ bool ManagerService::StartVm(const std::string& vm_id, std::string* error) {
         if (vmp->state == VmPowerState::kRunning || vmp->state == VmPowerState::kStarting) {
             return true;
         }
-        // Ensure the previous read thread has finished and all handles are closed.
-        if (vmp->runtime.read_thread.joinable()) {
-            vmp->runtime.read_running.store(false);
-            if (vmp->runtime.pipe_handle) {
-                CancelIoEx(reinterpret_cast<HANDLE>(vmp->runtime.pipe_handle), nullptr);
+    }
+    {
+        VmRecord* vmp = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(vms_mutex_);
+            vmp = FindVm(vm_id);
+            if (!vmp) {
+                if (error) *error = i18n::tr(i18n::S::kErrVmNotFound);
+                return false;
             }
-            vmp->runtime.read_thread.join();
+        }
+        StopVmLoop(*vmp);
+    }
+    {
+        std::lock_guard<std::mutex> lock(vms_mutex_);
+        VmRecord* vmp = FindVm(vm_id);
+        if (!vmp) {
+            if (error) *error = i18n::tr(i18n::S::kErrVmNotFound);
+            return false;
         }
         CleanupRuntimeHandles(*vmp);
         vmp->state = VmPowerState::kStarting;
-        pipe_name = "tenbox_vm_" + vmp->spec.vm_id;
+        pipe_name = R"(\\.\pipe\tenbox_vm_)" + vmp->spec.vm_id.substr(0, 8)
+                    + "_" + std::to_string(GetTickCount64());
         vmp->runtime.pipe_name = pipe_name;
         spec_copy = vmp->spec;
+    }
+
+    // Start the libuv loop thread which binds + listens the named pipe
+    // BEFORE launching the runtime process, so the pipe exists when it connects.
+    {
+        std::lock_guard<std::mutex> lock(vms_mutex_);
+        VmRecord* vmp = FindVm(vm_id);
+        if (!vmp) {
+            if (error) *error = i18n::tr(i18n::S::kErrVmDisappearedDuringStart);
+            return false;
+        }
+        if (!StartVmLoop(vm_id, *vmp)) {
+            vmp->state = VmPowerState::kStopped;
+            if (error) *error = i18n::tr(i18n::S::kErrIpcConnectionFailed);
+            return false;
+        }
     }
 
     const std::string cmd = BuildRuntimeCommand(runtime_exe_path_, spec_copy, pipe_name);
@@ -491,7 +486,7 @@ bool ManagerService::StartVm(const std::string& vm_id, std::string* error) {
             nullptr,
             nullptr,
             hLog != INVALID_HANDLE_VALUE ? TRUE : FALSE,
-            CREATE_NO_WINDOW | CREATE_SUSPENDED,
+            CREATE_NO_WINDOW,
             nullptr,
             nullptr,
             &si,
@@ -504,79 +499,41 @@ bool ManagerService::StartVm(const std::string& vm_id, std::string* error) {
     if (!ok) {
         std::lock_guard<std::mutex> lock(vms_mutex_);
         VmRecord* vmp = FindVm(vm_id);
-        if (vmp) vmp->state = VmPowerState::kStopped;
+        if (vmp) {
+            StopVmLoop(*vmp);
+            vmp->state = VmPowerState::kStopped;
+        }
         if (error) *error = i18n::tr(i18n::S::kErrLaunchRuntimeFailed);
-        return false;
-    }
-
-    // Create pipe before resuming the process (Manager is the pipe server).
-    const std::string pipe_full = R"(\\.\pipe\)" + pipe_name;
-    HANDLE pipe = CreateNamedPipeA(
-        pipe_full.c_str(),
-        PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        1,
-        64 * 1024,
-        64 * 1024,
-        5000,
-        nullptr);
-    if (pipe == INVALID_HANDLE_VALUE) {
-        LOG_ERROR("CreateNamedPipe failed for %s: %lu", pipe_full.c_str(), GetLastError());
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        std::lock_guard<std::mutex> lock(vms_mutex_);
-        VmRecord* vmp = FindVm(vm_id);
-        if (vmp) vmp->state = VmPowerState::kStopped;
-        if (error) *error = i18n::tr(i18n::S::kErrIpcConnectionFailed);
         return false;
     }
 
     if (job_object_) {
         AssignProcessToJobObject(reinterpret_cast<HANDLE>(job_object_), pi.hProcess);
     }
-    ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
-
-    // Wait for Runtime to connect.
-    BOOL connected = ConnectNamedPipe(pipe, nullptr);
-    bool pipe_ok = connected || (GetLastError() == ERROR_PIPE_CONNECTED);
 
     {
         std::lock_guard<std::mutex> lock(vms_mutex_);
         VmRecord* vmp = FindVm(vm_id);
         if (!vmp) {
             CloseHandle(pi.hProcess);
-            DisconnectNamedPipe(pipe);
-            CloseHandle(pipe);
             if (error) *error = i18n::tr(i18n::S::kErrVmDisappearedDuringStart);
             return false;
         }
         vmp->runtime.process_handle = pi.hProcess;
         vmp->runtime.process_id = pi.dwProcessId;
-
-        if (pipe_ok) {
-            vmp->runtime.pipe_handle = pipe;
-            vmp->state = VmPowerState::kRunning;
-            vmp->spec.last_boot_time = static_cast<int64_t>(std::chrono::system_clock::to_time_t(
-                std::chrono::system_clock::now()));
-            settings::SaveVmManifest(vmp->spec);
-            StartReadThread(vm_id, *vmp);
-        } else {
-            DisconnectNamedPipe(pipe);
-            CloseHandle(pipe);
-            vmp->state = VmPowerState::kCrashed;
-            if (error) *error = i18n::tr(i18n::S::kErrIpcConnectionFailed);
-        }
-        return vmp->state == VmPowerState::kRunning;
+        vmp->state = VmPowerState::kRunning;
+        vmp->spec.last_boot_time = static_cast<int64_t>(std::chrono::system_clock::to_time_t(
+            std::chrono::system_clock::now()));
+        settings::SaveVmManifest(vmp->spec);
+        return true;
     }
 }
 
 bool ManagerService::StopVm(const std::string& vm_id, std::string* error) {
     HANDLE process_handle = nullptr;
-    std::thread read_thread_to_join;
-    HANDLE pipe_handle = nullptr;
     bool crashed = false;
-    
+
     {
         std::lock_guard<std::mutex> lock(vms_mutex_);
         VmRecord* vmp = FindVm(vm_id);
@@ -590,9 +547,8 @@ bool ManagerService::StopVm(const std::string& vm_id, std::string* error) {
         crashed = (vm.state == VmPowerState::kCrashed);
         vm.state = VmPowerState::kStopping;
         process_handle = reinterpret_cast<HANDLE>(vm.runtime.process_handle);
-        pipe_handle = reinterpret_cast<HANDLE>(vm.runtime.pipe_handle);
 
-        if (!crashed && pipe_handle) {
+        if (!crashed && vm.runtime.pipe_connected) {
             ipc::Message msg;
             msg.channel = ipc::Channel::kControl;
             msg.kind = ipc::Kind::kRequest;
@@ -602,27 +558,17 @@ bool ManagerService::StopVm(const std::string& vm_id, std::string* error) {
             msg.fields["command"] = "stop";
             SendRuntimeMessage(vm, msg);
         }
+    }
 
-        // Stop read thread: set flag and cancel IO (inside lock)
-        if (vm.runtime.read_thread.joinable()) {
-            vm.runtime.read_running.store(false);
-            if (pipe_handle) {
-                CancelIoEx(pipe_handle, nullptr);
-            }
-            // Move thread out to join outside the lock
-            read_thread_to_join = std::move(vm.runtime.read_thread);
+    if (process_handle) {
+        DWORD wait = WaitForSingleObject(process_handle, crashed ? 500 : 3000);
+        if (wait == WAIT_TIMEOUT) {
+            LOG_ERROR("VM %s runtime did not exit in time, terminating", vm_id.c_str());
+            TerminateProcess(process_handle, 1);
+            WaitForSingleObject(process_handle, 1000);
         }
     }
 
-    // Wait for process and join read thread outside the lock
-    if (process_handle) {
-        WaitForSingleObject(process_handle, crashed ? 500 : 3000);
-    }
-    if (read_thread_to_join.joinable()) {
-        read_thread_to_join.join();
-    }
-
-    // Cleanup handles and update state (inside lock)
     {
         std::lock_guard<std::mutex> lock(vms_mutex_);
         VmRecord* vmp = FindVm(vm_id);
@@ -630,8 +576,33 @@ bool ManagerService::StopVm(const std::string& vm_id, std::string* error) {
             if (error) *error = "vm not found";
             return false;
         }
-        CleanupRuntimeHandles(*vmp);
-        vmp->state = VmPowerState::kStopped;
+        // StopVmLoop joins the loop thread (must be called without holding
+        // the lock only if the loop callbacks need to re-acquire it, but
+        // they do — so release and re-acquire).
+    }
+
+    // StopVmLoop needs to join the thread which may call HandleProcessExit
+    // which acquires vms_mutex_, so call outside the lock.
+    VmRecord* vmp = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(vms_mutex_);
+        vmp = FindVm(vm_id);
+        if (!vmp) {
+            if (error) *error = "vm not found";
+            return false;
+        }
+    }
+    StopVmLoop(*vmp);
+
+    {
+        std::lock_guard<std::mutex> lock(vms_mutex_);
+        VmRecord* vmp2 = FindVm(vm_id);
+        if (!vmp2) {
+            if (error) *error = "vm not found";
+            return false;
+        }
+        CleanupRuntimeHandles(*vmp2);
+        vmp2->state = VmPowerState::kStopped;
     }
     return true;
 }
@@ -766,14 +737,16 @@ void ManagerService::LoadVms() {
 // ── Runtime IPC ──────────────────────────────────────────────────────
 
 bool ManagerService::SendRuntimeMessage(VmRecord& vm, const ipc::Message& msg) {
-    if (!vm.runtime.pipe_handle) return false;
-    HANDLE pipe = reinterpret_cast<HANDLE>(vm.runtime.pipe_handle);
+    if (!vm.runtime.pipe_connected) return false;
     std::string encoded = ipc::Encode(msg);
-    DWORD written = 0;
-    if (!WriteFile(pipe, encoded.data(), static_cast<DWORD>(encoded.size()), &written, nullptr)) {
-        return false;
+    {
+        std::lock_guard<std::mutex> lock(vm.runtime.send_mutex);
+        vm.runtime.send_queue.push_back(std::move(encoded));
     }
-    return written == encoded.size();
+    if (vm.runtime.loop_initialized) {
+        uv_async_send(&vm.runtime.send_wakeup);
+    }
+    return true;
 }
 
 void ManagerService::ApplyPendingPatchLocked(VmRecord& vm) {
@@ -785,30 +758,35 @@ void ManagerService::ApplyPendingPatchLocked(VmRecord& vm) {
 }
 
 void ManagerService::CleanupRuntimeHandles(VmRecord& vm) {
-    if (vm.runtime.pipe_handle) {
-        HANDLE pipe = reinterpret_cast<HANDLE>(vm.runtime.pipe_handle);
-        FlushFileBuffers(pipe);
-        DisconnectNamedPipe(pipe);
-        CloseHandle(pipe);
-        vm.runtime.pipe_handle = nullptr;
-    }
+    vm.runtime.pipe_connected = false;
     if (vm.runtime.process_handle) {
         HANDLE proc = reinterpret_cast<HANDLE>(vm.runtime.process_handle);
-        WaitForSingleObject(proc, 1000);
+        DWORD wait = WaitForSingleObject(proc, 1000);
+        if (wait == WAIT_TIMEOUT) {
+            TerminateProcess(proc, 1);
+            WaitForSingleObject(proc, 500);
+        }
         DWORD exit_code = 0;
         GetExitCodeProcess(proc, &exit_code);
         vm.last_exit_code = static_cast<int>(exit_code);
         CloseHandle(proc);
         vm.runtime.process_handle = nullptr;
     }
-    vm.runtime.read_running.store(false);
+    vm.runtime.process_id = 0;
+    vm.runtime.recv_pending.clear();
+    vm.runtime.recv_payload_needed = 0;
+    vm.runtime.recv_pending_msg = {};
+    {
+        std::lock_guard<std::mutex> lock(vm.runtime.send_mutex);
+        vm.runtime.send_queue.clear();
+    }
     bool had_patch = vm.pending_patch.has_value();
     ApplyPendingPatchLocked(vm);
     if (had_patch) settings::SaveVmManifest(vm.spec);
 }
 
 void ManagerService::CloseRuntime(VmRecord& vm) {
-    StopReadThread(vm);
+    StopVmLoop(vm);
     CleanupRuntimeHandles(vm);
 }
 
@@ -877,14 +855,9 @@ bool ManagerService::IsGuestAgentConnected(const std::string& vm_id) const {
 }
 
 bool ManagerService::SendKeyEvent(const std::string& vm_id, uint32_t key_code, bool pressed) {
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    {
-        std::lock_guard<std::mutex> lock(vms_mutex_);
-        const VmRecord* vm = FindVm(vm_id);
-        if (!vm) return false;
-        pipe = reinterpret_cast<HANDLE>(vm->runtime.pipe_handle);
-    }
-    if (!pipe || pipe == INVALID_HANDLE_VALUE) return false;
+    std::lock_guard<std::mutex> lock(vms_mutex_);
+    VmRecord* vm = FindVm(vm_id);
+    if (!vm) return false;
 
     ipc::Message msg;
     msg.channel = ipc::Channel::kInput;
@@ -894,23 +867,14 @@ bool ManagerService::SendKeyEvent(const std::string& vm_id, uint32_t key_code, b
     msg.request_id = GetTickCount64();
     msg.fields["key_code"] = std::to_string(key_code);
     msg.fields["pressed"] = pressed ? "1" : "0";
-
-    std::string encoded = ipc::Encode(msg);
-    DWORD written = 0;
-    return WriteFile(pipe, encoded.data(), static_cast<DWORD>(encoded.size()), &written, nullptr)
-        && written == encoded.size();
+    return SendRuntimeMessage(*vm, msg);
 }
 
 bool ManagerService::SendPointerEvent(const std::string& vm_id,
                                        int32_t x, int32_t y, uint32_t buttons) {
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    {
-        std::lock_guard<std::mutex> lock(vms_mutex_);
-        const VmRecord* vm = FindVm(vm_id);
-        if (!vm) return false;
-        pipe = reinterpret_cast<HANDLE>(vm->runtime.pipe_handle);
-    }
-    if (!pipe || pipe == INVALID_HANDLE_VALUE) return false;
+    std::lock_guard<std::mutex> lock(vms_mutex_);
+    VmRecord* vm = FindVm(vm_id);
+    if (!vm) return false;
 
     ipc::Message msg;
     msg.channel = ipc::Channel::kInput;
@@ -921,22 +885,13 @@ bool ManagerService::SendPointerEvent(const std::string& vm_id,
     msg.fields["x"] = std::to_string(x);
     msg.fields["y"] = std::to_string(y);
     msg.fields["buttons"] = std::to_string(buttons);
-
-    std::string encoded = ipc::Encode(msg);
-    DWORD written = 0;
-    return WriteFile(pipe, encoded.data(), static_cast<DWORD>(encoded.size()), &written, nullptr)
-        && written == encoded.size();
+    return SendRuntimeMessage(*vm, msg);
 }
 
 bool ManagerService::SendWheelEvent(const std::string& vm_id, int32_t delta) {
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    {
-        std::lock_guard<std::mutex> lock(vms_mutex_);
-        const VmRecord* vm = FindVm(vm_id);
-        if (!vm) return false;
-        pipe = reinterpret_cast<HANDLE>(vm->runtime.pipe_handle);
-    }
-    if (!pipe || pipe == INVALID_HANDLE_VALUE) return false;
+    std::lock_guard<std::mutex> lock(vms_mutex_);
+    VmRecord* vm = FindVm(vm_id);
+    if (!vm) return false;
 
     ipc::Message msg;
     msg.channel = ipc::Channel::kInput;
@@ -945,22 +900,13 @@ bool ManagerService::SendWheelEvent(const std::string& vm_id, int32_t delta) {
     msg.vm_id = vm_id;
     msg.request_id = GetTickCount64();
     msg.fields["delta"] = std::to_string(delta);
-
-    std::string encoded = ipc::Encode(msg);
-    DWORD written = 0;
-    return WriteFile(pipe, encoded.data(), static_cast<DWORD>(encoded.size()), &written, nullptr)
-        && written == encoded.size();
+    return SendRuntimeMessage(*vm, msg);
 }
 
 bool ManagerService::SetDisplaySize(const std::string& vm_id, uint32_t width, uint32_t height) {
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    {
-        std::lock_guard<std::mutex> lock(vms_mutex_);
-        const VmRecord* vm = FindVm(vm_id);
-        if (!vm) return false;
-        pipe = reinterpret_cast<HANDLE>(vm->runtime.pipe_handle);
-    }
-    if (!pipe || pipe == INVALID_HANDLE_VALUE) return false;
+    std::lock_guard<std::mutex> lock(vms_mutex_);
+    VmRecord* vm = FindVm(vm_id);
+    if (!vm) return false;
 
     ipc::Message msg;
     msg.channel = ipc::Channel::kDisplay;
@@ -970,23 +916,14 @@ bool ManagerService::SetDisplaySize(const std::string& vm_id, uint32_t width, ui
     msg.request_id = GetTickCount64();
     msg.fields["width"] = std::to_string(width);
     msg.fields["height"] = std::to_string(height);
-
-    std::string encoded = ipc::Encode(msg);
-    DWORD written = 0;
-    return WriteFile(pipe, encoded.data(), static_cast<DWORD>(encoded.size()), &written, nullptr)
-        && written == encoded.size();
+    return SendRuntimeMessage(*vm, msg);
 }
 
 bool ManagerService::SendClipboardGrab(const std::string& vm_id,
                                        const std::vector<uint32_t>& types) {
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    {
-        std::lock_guard<std::mutex> lock(vms_mutex_);
-        const VmRecord* vm = FindVm(vm_id);
-        if (!vm) return false;
-        pipe = reinterpret_cast<HANDLE>(vm->runtime.pipe_handle);
-    }
-    if (!pipe || pipe == INVALID_HANDLE_VALUE) return false;
+    std::lock_guard<std::mutex> lock(vms_mutex_);
+    VmRecord* vm = FindVm(vm_id);
+    if (!vm) return false;
 
     ipc::Message msg;
     msg.channel = ipc::Channel::kClipboard;
@@ -1001,23 +938,14 @@ bool ManagerService::SendClipboardGrab(const std::string& vm_id,
         types_str += std::to_string(types[i]);
     }
     msg.fields["types"] = types_str;
-
-    std::string encoded = ipc::Encode(msg);
-    DWORD written = 0;
-    return WriteFile(pipe, encoded.data(), static_cast<DWORD>(encoded.size()), &written, nullptr)
-        && written == encoded.size();
+    return SendRuntimeMessage(*vm, msg);
 }
 
 bool ManagerService::SendClipboardData(const std::string& vm_id, uint32_t type,
                                        const uint8_t* data, size_t len) {
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    {
-        std::lock_guard<std::mutex> lock(vms_mutex_);
-        const VmRecord* vm = FindVm(vm_id);
-        if (!vm) return false;
-        pipe = reinterpret_cast<HANDLE>(vm->runtime.pipe_handle);
-    }
-    if (!pipe || pipe == INVALID_HANDLE_VALUE) return false;
+    std::lock_guard<std::mutex> lock(vms_mutex_);
+    VmRecord* vm = FindVm(vm_id);
+    if (!vm) return false;
 
     ipc::Message msg;
     msg.channel = ipc::Channel::kClipboard;
@@ -1029,22 +957,13 @@ bool ManagerService::SendClipboardData(const std::string& vm_id, uint32_t type,
     if (data && len > 0) {
         msg.payload.assign(data, data + len);
     }
-
-    std::string encoded = ipc::Encode(msg);
-    DWORD written = 0;
-    return WriteFile(pipe, encoded.data(), static_cast<DWORD>(encoded.size()), &written, nullptr)
-        && written == encoded.size();
+    return SendRuntimeMessage(*vm, msg);
 }
 
 bool ManagerService::SendClipboardRequest(const std::string& vm_id, uint32_t type) {
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    {
-        std::lock_guard<std::mutex> lock(vms_mutex_);
-        const VmRecord* vm = FindVm(vm_id);
-        if (!vm) return false;
-        pipe = reinterpret_cast<HANDLE>(vm->runtime.pipe_handle);
-    }
-    if (!pipe || pipe == INVALID_HANDLE_VALUE) return false;
+    std::lock_guard<std::mutex> lock(vms_mutex_);
+    VmRecord* vm = FindVm(vm_id);
+    if (!vm) return false;
 
     ipc::Message msg;
     msg.channel = ipc::Channel::kClipboard;
@@ -1053,22 +972,13 @@ bool ManagerService::SendClipboardRequest(const std::string& vm_id, uint32_t typ
     msg.vm_id = vm_id;
     msg.request_id = GetTickCount64();
     msg.fields["data_type"] = std::to_string(type);
-
-    std::string encoded = ipc::Encode(msg);
-    DWORD written = 0;
-    return WriteFile(pipe, encoded.data(), static_cast<DWORD>(encoded.size()), &written, nullptr)
-        && written == encoded.size();
+    return SendRuntimeMessage(*vm, msg);
 }
 
 bool ManagerService::SendClipboardRelease(const std::string& vm_id) {
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    {
-        std::lock_guard<std::mutex> lock(vms_mutex_);
-        const VmRecord* vm = FindVm(vm_id);
-        if (!vm) return false;
-        pipe = reinterpret_cast<HANDLE>(vm->runtime.pipe_handle);
-    }
-    if (!pipe || pipe == INVALID_HANDLE_VALUE) return false;
+    std::lock_guard<std::mutex> lock(vms_mutex_);
+    VmRecord* vm = FindVm(vm_id);
+    if (!vm) return false;
 
     ipc::Message msg;
     msg.channel = ipc::Channel::kClipboard;
@@ -1076,11 +986,7 @@ bool ManagerService::SendClipboardRelease(const std::string& vm_id) {
     msg.type = "clipboard.release";
     msg.vm_id = vm_id;
     msg.request_id = GetTickCount64();
-
-    std::string encoded = ipc::Encode(msg);
-    DWORD written = 0;
-    return WriteFile(pipe, encoded.data(), static_cast<DWORD>(encoded.size()), &written, nullptr)
-        && written == encoded.size();
+    return SendRuntimeMessage(*vm, msg);
 }
 
 bool ManagerService::AddSharedFolder(const std::string& vm_id, const SharedFolder& folder, 
@@ -1273,14 +1179,9 @@ std::vector<PortForward> ManagerService::GetPortForwards(const std::string& vm_i
 }
 
 bool ManagerService::SendConsoleInput(const std::string& vm_id, const std::string& input) {
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    {
-        std::lock_guard<std::mutex> lock(vms_mutex_);
-        const VmRecord* vm = FindVm(vm_id);
-        if (!vm) return false;
-        pipe = reinterpret_cast<HANDLE>(vm->runtime.pipe_handle);
-    }
-    if (!pipe || pipe == INVALID_HANDLE_VALUE) return false;
+    std::lock_guard<std::mutex> lock(vms_mutex_);
+    VmRecord* vm = FindVm(vm_id);
+    if (!vm) return false;
 
     ipc::Message msg;
     msg.channel = ipc::Channel::kConsole;
@@ -1289,59 +1190,35 @@ bool ManagerService::SendConsoleInput(const std::string& vm_id, const std::strin
     msg.vm_id = vm_id;
     msg.request_id = GetTickCount64();
     msg.fields["data_hex"] = EncodeHex(input);
-
-    std::string encoded = ipc::Encode(msg);
-    DWORD written = 0;
-    return WriteFile(pipe, encoded.data(), static_cast<DWORD>(encoded.size()), &written, nullptr)
-        && written == encoded.size();
+    return SendRuntimeMessage(*vm, msg);
 }
 
-void ManagerService::StartReadThread(const std::string& vm_id, VmRecord& vm) {
-    if (vm.runtime.read_running.load()) return;
-    if (vm.runtime.read_thread.joinable()) {
-        vm.runtime.read_thread.join();
-    }
-    vm.runtime.read_running.store(true);
-    vm.runtime.read_thread = std::thread(&ManagerService::PipeReadThreadFunc, this, vm_id);
-}
-
-void ManagerService::StopReadThread(VmRecord& vm) {
-    vm.runtime.read_running.store(false);
-    if (vm.runtime.pipe_handle) {
-        CancelIoEx(reinterpret_cast<HANDLE>(vm.runtime.pipe_handle), nullptr);
-    }
-    if (vm.runtime.read_thread.joinable()) {
-        vm.runtime.read_thread.join();
-    }
-}
-
-void ManagerService::DispatchPipeData(std::string& pending, PipeParseState& parse,
-                                      const std::string& vm_id) {
-    while (!pending.empty()) {
-        if (parse.payload_needed > 0) {
-            if (pending.size() < parse.payload_needed) return;
-            parse.pending_msg.payload.assign(
-                reinterpret_cast<const uint8_t*>(pending.data()),
-                reinterpret_cast<const uint8_t*>(pending.data()) + parse.payload_needed);
-            pending.erase(0, parse.payload_needed);
-            parse.payload_needed = 0;
-            HandleIncomingMessage(vm_id, parse.pending_msg);
+void ManagerService::DispatchPipeData(VmRuntimeHandle& rt, const std::string& vm_id) {
+    while (!rt.recv_pending.empty()) {
+        if (rt.recv_payload_needed > 0) {
+            if (rt.recv_pending.size() < rt.recv_payload_needed) return;
+            rt.recv_pending_msg.payload.assign(
+                reinterpret_cast<const uint8_t*>(rt.recv_pending.data()),
+                reinterpret_cast<const uint8_t*>(rt.recv_pending.data()) + rt.recv_payload_needed);
+            rt.recv_pending.erase(0, rt.recv_payload_needed);
+            rt.recv_payload_needed = 0;
+            HandleIncomingMessage(vm_id, rt.recv_pending_msg);
             continue;
         }
 
-        size_t nl = pending.find('\n');
+        size_t nl = rt.recv_pending.find('\n');
         if (nl == std::string::npos) return;
-        std::string line = pending.substr(0, nl + 1);
-        pending.erase(0, nl + 1);
+        std::string line = rt.recv_pending.substr(0, nl + 1);
+        rt.recv_pending.erase(0, nl + 1);
         auto decoded = ipc::Decode(line);
         if (!decoded) continue;
 
         auto ps_it = decoded->fields.find("payload_size");
         if (ps_it != decoded->fields.end()) {
-            parse.payload_needed = std::strtoull(ps_it->second.c_str(), nullptr, 10);
+            rt.recv_payload_needed = std::strtoull(ps_it->second.c_str(), nullptr, 10);
             decoded->fields.erase(ps_it);
-            if (parse.payload_needed > 0) {
-                parse.pending_msg = std::move(*decoded);
+            if (rt.recv_payload_needed > 0) {
+                rt.recv_pending_msg = std::move(*decoded);
                 continue;
             }
         }
@@ -1350,10 +1227,8 @@ void ManagerService::DispatchPipeData(std::string& pending, PipeParseState& pars
 }
 
 void ManagerService::HandleProcessExit(const std::string& vm_id) {
-    // Called from PipeReadThreadFunc -- must NOT call CleanupRuntimeHandles here
-    // because the read thread is still running (can't join self) and the pipe
-    // handle it holds would be closed out from under it.
-    // We only update state; actual handle cleanup happens in FinishReadThread.
+    // Called from the libuv read callback on the loop thread.
+    // We only update state here; actual handle cleanup happens in StopVm.
     StateChangeCallback cb;
     bool needs_reboot = false;
     {
@@ -1388,7 +1263,7 @@ void ManagerService::HandleProcessExit(const std::string& vm_id) {
     if (needs_reboot) {
         LOG_INFO("VM %s requested reboot, restarting...", vm_id.c_str());
         // StartVm is called on a separate thread because it will join the
-        // current read_thread (can't join self).
+        // current loop_thread (can't join self).
         std::thread([this, vm_id]() {
             std::string error;
             if (!StartVm(vm_id, &error)) {
@@ -1405,72 +1280,197 @@ void ManagerService::HandleProcessExit(const std::string& vm_id) {
     }
 }
 
-void ManagerService::PipeReadThreadFunc(const std::string& vm_id) {
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    HANDLE process = INVALID_HANDLE_VALUE;
-    std::atomic<bool>* running_flag = nullptr;
+// ── libuv per-VM event loop ──────────────────────────────────────────
+
+static void MgrCloseWalkCb(uv_handle_t* handle, void*) {
+    if (!uv_is_closing(handle)) uv_close(handle, nullptr);
+}
+
+bool ManagerService::StartVmLoop(const std::string& vm_id, VmRecord& vm) {
+    if (vm.runtime.loop_initialized) return true;
+
+    uv_loop_init(&vm.runtime.loop);
+    vm.runtime.loop_initialized = true;
+
+    auto* ctx = new LoopContext{this, vm_id};
+
+    vm.runtime.server_pipe.data = ctx;
+    uv_pipe_init(&vm.runtime.loop, &vm.runtime.server_pipe, 0);
+
+    vm.runtime.send_wakeup.data = ctx;
+    uv_async_init(&vm.runtime.loop, &vm.runtime.send_wakeup, OnSendWakeup);
+
+    vm.runtime.stop_wakeup.data = ctx;
+    uv_async_init(&vm.runtime.loop, &vm.runtime.stop_wakeup, OnStopSignal);
+
+    const std::string& pipe_path = vm.runtime.pipe_name;
+    int r = uv_pipe_bind(&vm.runtime.server_pipe, pipe_path.c_str());
+    if (r < 0) {
+        LOG_ERROR("uv_pipe_bind failed for %s: %s", pipe_path.c_str(), uv_strerror(r));
+        uv_walk(&vm.runtime.loop, MgrCloseWalkCb, nullptr);
+        uv_run(&vm.runtime.loop, UV_RUN_DEFAULT);
+        uv_loop_close(&vm.runtime.loop);
+        vm.runtime.loop_initialized = false;
+        delete ctx;
+        return false;
+    }
+
+    r = uv_listen(reinterpret_cast<uv_stream_t*>(&vm.runtime.server_pipe), 1, OnConnection);
+    if (r < 0) {
+        LOG_ERROR("uv_listen failed for %s: %s", pipe_path.c_str(), uv_strerror(r));
+        uv_walk(&vm.runtime.loop, MgrCloseWalkCb, nullptr);
+        uv_run(&vm.runtime.loop, UV_RUN_DEFAULT);
+        uv_loop_close(&vm.runtime.loop);
+        vm.runtime.loop_initialized = false;
+        delete ctx;
+        return false;
+    }
+
+    vm.runtime.loop_thread = std::thread(&ManagerService::VmLoopThread, this, vm_id);
+    return true;
+}
+
+void ManagerService::StopVmLoop(VmRecord& vm) {
+    if (!vm.runtime.loop_initialized) return;
+    uv_async_send(&vm.runtime.stop_wakeup);
+    if (vm.runtime.loop_thread.joinable()) {
+        vm.runtime.loop_thread.join();
+    }
+    vm.runtime.loop_initialized = false;
+    vm.runtime.pipe_connected = false;
+}
+
+void ManagerService::VmLoopThread(const std::string& vm_id) {
+    VmRuntimeHandle* rt = nullptr;
     {
         std::lock_guard<std::mutex> lock(vms_mutex_);
         VmRecord* vm = FindVm(vm_id);
         if (!vm) return;
-        pipe = reinterpret_cast<HANDLE>(vm->runtime.pipe_handle);
-        process = reinterpret_cast<HANDLE>(vm->runtime.process_handle);
-        running_flag = &vm->runtime.read_running;
+        rt = &vm->runtime;
     }
-    if (!pipe || pipe == INVALID_HANDLE_VALUE || !running_flag) return;
+    uv_run(&rt->loop, UV_RUN_DEFAULT);
 
-    std::array<char, 65536> buf{};
-    std::string pending;
-    PipeParseState parse;
-    bool process_exited = false;
-    DWORD idle_count = 0;
+    auto* ctx = static_cast<LoopContext*>(rt->server_pipe.data);
+    uv_loop_close(&rt->loop);
+    delete ctx;
+}
 
-    while (running_flag->load()) {
-        DWORD available = 0;
-        if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
-            DWORD err = GetLastError();
-            if (err == ERROR_BROKEN_PIPE || err == ERROR_INVALID_HANDLE) {
-                process_exited = true;
-                break;
-            }
-            Sleep(10);
-            idle_count++;
-        } else if (available == 0) {
-            Sleep(10);
-            idle_count++;
-        } else {
-            idle_count = 0;
-            DWORD to_read = (std::min)(available, static_cast<DWORD>(buf.size()));
-            DWORD bytes_read = 0;
-            if (!ReadFile(pipe, buf.data(), to_read, &bytes_read, nullptr)) {
-                DWORD err = GetLastError();
-                if (err == ERROR_BROKEN_PIPE || err == ERROR_OPERATION_ABORTED) {
-                    process_exited = true;
-                    break;
-                }
-                continue;
-            }
-            if (bytes_read > 0) {
-                pending.append(buf.data(), bytes_read);
-                DispatchPipeData(pending, parse, vm_id);
+void ManagerService::OnConnection(uv_stream_t* server, int status) {
+    auto* ctx = static_cast<LoopContext*>(server->data);
+    if (status < 0) {
+        LOG_ERROR("OnConnection error: %s", uv_strerror(status));
+        return;
+    }
+
+    VmRuntimeHandle* rt = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(ctx->service->vms_mutex_);
+        VmRecord* vm = ctx->service->FindVm(ctx->vm_id);
+        if (!vm) return;
+        rt = &vm->runtime;
+    }
+
+    if (rt->pipe_connected) return;
+
+    rt->client_pipe.data = ctx;
+    uv_pipe_init(&rt->loop, &rt->client_pipe, 0);
+
+    if (uv_accept(server, reinterpret_cast<uv_stream_t*>(&rt->client_pipe)) == 0) {
+        rt->pipe_connected = true;
+        uv_read_start(reinterpret_cast<uv_stream_t*>(&rt->client_pipe),
+                       OnAllocBuffer, OnPipeRead);
+    } else {
+        uv_close(reinterpret_cast<uv_handle_t*>(&rt->client_pipe), nullptr);
+    }
+}
+
+void ManagerService::OnAllocBuffer(uv_handle_t*, size_t suggested, uv_buf_t* buf) {
+    buf->base = new char[suggested];
+    buf->len = static_cast<decltype(buf->len)>(suggested);
+}
+
+void ManagerService::OnPipeRead(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
+    auto* ctx = static_cast<LoopContext*>(stream->data);
+
+    if (nread < 0) {
+        delete[] buf->base;
+        uv_read_stop(stream);
+
+        VmRuntimeHandle* rt = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(ctx->service->vms_mutex_);
+            VmRecord* vm = ctx->service->FindVm(ctx->vm_id);
+            if (vm) {
+                rt = &vm->runtime;
+                rt->pipe_connected = false;
             }
         }
-
-        if (idle_count >= 50 && process && process != INVALID_HANDLE_VALUE) {
-            DWORD exit_code = 0;
-            if (GetExitCodeProcess(process, &exit_code) && exit_code != STILL_ACTIVE) {
-                process_exited = true;
-                break;
-            }
-            idle_count = 0;
-        }
+        ctx->service->HandleProcessExit(ctx->vm_id);
+        return;
+    }
+    if (nread == 0) {
+        delete[] buf->base;
+        return;
     }
 
-    running_flag->store(false);
-
-    if (process_exited) {
-        HandleProcessExit(vm_id);
+    VmRuntimeHandle* rt = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(ctx->service->vms_mutex_);
+        VmRecord* vm = ctx->service->FindVm(ctx->vm_id);
+        if (!vm) { delete[] buf->base; return; }
+        rt = &vm->runtime;
     }
+
+    rt->recv_pending.append(buf->base, static_cast<size_t>(nread));
+    delete[] buf->base;
+
+    ctx->service->DispatchPipeData(*rt, ctx->vm_id);
+}
+
+void ManagerService::OnWriteDone(uv_write_t* req, int) {
+    delete static_cast<std::string*>(req->data);
+    delete req;
+}
+
+void ManagerService::OnSendWakeup(uv_async_t* handle) {
+    auto* ctx = static_cast<LoopContext*>(handle->data);
+
+    VmRuntimeHandle* rt = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(ctx->service->vms_mutex_);
+        VmRecord* vm = ctx->service->FindVm(ctx->vm_id);
+        if (!vm) return;
+        rt = &vm->runtime;
+    }
+    if (!rt->pipe_connected) return;
+
+    std::deque<std::string> msgs;
+    {
+        std::lock_guard<std::mutex> lock(rt->send_mutex);
+        msgs.swap(rt->send_queue);
+    }
+
+    std::string batch;
+    for (auto& m : msgs) {
+        batch += std::move(m);
+    }
+    if (batch.empty()) return;
+
+    auto* write_data = new std::string(std::move(batch));
+    auto* req = new uv_write_t;
+    req->data = write_data;
+    uv_buf_t uv_buf = uv_buf_init(const_cast<char*>(write_data->data()),
+                                    static_cast<unsigned int>(write_data->size()));
+    uv_write(req, reinterpret_cast<uv_stream_t*>(&rt->client_pipe),
+             &uv_buf, 1, OnWriteDone);
+}
+
+void ManagerService::OnStopSignal(uv_async_t* handle) {
+    // Don't acquire vms_mutex_ here — the caller (StopVmLoop) may already
+    // hold it, and join()ing this thread while holding the lock would deadlock.
+    // pipe_connected is only read on the loop thread after this point, and
+    // StopVmLoop sets it to false after join() returns.
+    uv_walk(handle->loop, MgrCloseWalkCb, nullptr);
 }
 
 void ManagerService::HandleIncomingMessage(const std::string& vm_id, const ipc::Message& msg) {

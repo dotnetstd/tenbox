@@ -1,9 +1,10 @@
 #pragma once
 
 #include "common/ports.h"
-#include "ipc/ipc_transport.h"
 #include "ipc/protocol_v1.h"
 #include "ipc/shared_framebuffer.h"
+
+#include <uv.h>
 
 #include <atomic>
 #include <chrono>
@@ -34,12 +35,16 @@ public:
     // Called when new output data is available.
     void SetDataAvailableCallback(std::function<void()> callback);
 
+    using InputCallback = std::function<void(const uint8_t*, size_t)>;
+    void SetInputCallback(InputCallback cb);
+
 private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<uint8_t> queue_;
     std::string pending_write_;
     std::function<void()> data_available_callback_;
+    InputCallback input_callback_;
 };
 
 class ManagedInputPort final : public InputPort {
@@ -50,10 +55,17 @@ public:
     void PushKeyEvent(const KeyboardEvent& ev);
     void PushPointerEvent(const PointerEvent& ev);
 
+    using KeyCallback = std::function<void(const KeyboardEvent&)>;
+    using PointerCallback = std::function<void(const PointerEvent&)>;
+    void SetKeyEventCallback(KeyCallback cb);
+    void SetPointerEventCallback(PointerCallback cb);
+
 private:
     std::mutex mutex_;
     std::deque<KeyboardEvent> key_queue_;
     std::deque<PointerEvent> pointer_queue_;
+    KeyCallback key_callback_;
+    PointerCallback pointer_callback_;
 };
 
 class ManagedDisplayPort final : public DisplayPort {
@@ -111,9 +123,19 @@ public:
 private:
     bool Send(const ipc::Message& message);
     bool SendWithPayload(const ipc::Message& message);
-    void RunLoop();
+    void EventLoopThread();
     void HandleMessage(const ipc::Message& message);
-    bool EnsureClientConnected();
+    void DrainSendQueues();
+    void FlushConsoleData();
+    void WriteRaw(const std::string& data);
+
+    static void OnPipeRead(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf);
+    static void OnAllocBuffer(uv_handle_t* handle, size_t suggested, uv_buf_t* buf);
+    static void OnWriteDone(uv_write_t* req, int status);
+    static void OnSendWakeup(uv_async_t* handle);
+    static void OnConsoleCoalesce(uv_timer_t* handle);
+    static void OnStopSignal(uv_async_t* handle);
+    static void OnPipeConnect(uv_connect_t* req, int status);
 
     std::string vm_id_;
     std::string pipe_name_;
@@ -125,21 +147,33 @@ private:
 
     std::atomic<bool> running_{false};
 
-    // Dedicated threads for sending and receiving IPC over the named pipe.
-    std::thread send_thread_;
-    std::thread recv_thread_;
+    std::mutex start_mutex_;
+    std::condition_variable start_cv_;
+    bool loop_ready_ = false;
 
-    // Protects transport writes.
-    std::mutex send_mutex_;
-    std::unique_ptr<ipc::IpcTransport> transport_;
+    std::thread loop_thread_;
+
     Vm* vm_ = nullptr;
     std::atomic<uint64_t> next_event_id_{1};
 
-    // High-priority queue for small, latency-sensitive messages
-    // (console output, control responses, etc.).
+    // Send queues (protected by send_queue_mutex_, drained on event loop thread).
     std::mutex send_queue_mutex_;
-    std::condition_variable send_cv_;
     std::deque<std::string> console_queue_;
+
+    // libuv event loop handles
+    uv_loop_t loop_{};
+    uv_pipe_t pipe_{};
+    uv_connect_t connect_req_{};
+    uv_async_t send_wakeup_{};
+    uv_async_t stop_wakeup_{};
+    uv_timer_t console_coalesce_timer_{};
+    bool coalesce_running_ = false;
+    bool pipe_connected_ = false;
+
+    // Receive buffer
+    std::string recv_pending_;
+    size_t recv_payload_needed_ = 0;
+    ipc::Message recv_pending_msg_;
 
     // Shared-memory framebuffer for zero-copy frame transport.
     ipc::SharedFramebuffer shm_fb_;
@@ -147,13 +181,11 @@ private:
     uint32_t shm_generation_ = 0;
     bool shm_init_sent_ = false;
 
-    // Legacy frame queue (fallback when shm is unavailable).
     static constexpr size_t kMaxPendingFrames = 4;
     std::deque<std::string> frame_queue_;
     uint64_t frame_drop_count_ = 0;
     std::chrono::steady_clock::time_point last_frame_drop_log_{};
 
-    // Bounded queue for audio PCM chunks.
     static constexpr size_t kMaxPendingAudio = 32;
     std::deque<std::string> audio_queue_;
 };

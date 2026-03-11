@@ -69,32 +69,15 @@ else
 fi
 
 # ── Create DMG ───────────────────────────────────────────────────────────────
-# macOS 26.3+ blocks creating .app bundles on external/removable volumes,
-# which breaks the traditional hdiutil create -srcfolder approach.
-# Use hdiutil makehybrid instead: it builds the HFS image directly from
-# the local staging directory without mounting any intermediate volume.
+# Uses APFS (required for macOS 26 Tahoe where HFS+ has mounting bugs) and
+# a temporary volume name to avoid Gatekeeper blocking ditto when the .app
+# name matches the volume name. Produces a styled DMG with 128px icons,
+# drag-and-drop arrow background, and correct Finder view settings.
 
 rm -f "$OUTPUT"
 
-STAGING_DIR="$BUILD_DIR/dmg-staging"
-rm -rf "$STAGING_DIR"
-mkdir -p "$STAGING_DIR"
-
-ditto "$APP_PATH" "$STAGING_DIR/$(basename "$APP_PATH")"
-ln -s /Applications "$STAGING_DIR/Applications"
-
-echo "Creating DMG..."
-UNCOMPRESSED_DMG="$BUILD_DIR/TenBox-uncompressed.dmg"
-rm -f "$UNCOMPRESSED_DMG"
-
-hdiutil makehybrid -o "$UNCOMPRESSED_DMG" "$STAGING_DIR" \
-    -hfs -default-volume-name "$VOLUME_NAME"
-
-hdiutil convert "$UNCOMPRESSED_DMG" -format UDZO \
-    -imagekey zlib-level=9 -o "$OUTPUT"
-
-rm -f "$UNCOMPRESSED_DMG"
-rm -rf "$STAGING_DIR"
+echo "Building styled DMG..."
+python3 "$SCRIPT_DIR/make-dmg-styled.py" "$APP_PATH" "$VOLUME_NAME" "$OUTPUT"
 
 echo "  -> DMG created: $OUTPUT"
 

@@ -30,10 +30,6 @@ static std::string GetDefaultCmdline() {
 
 Vm::~Vm() {
     running_ = false;
-    if (input_thread_.joinable())
-        input_thread_.join();
-    if (hid_input_thread_.joinable())
-        hid_input_thread_.join();
     for (auto& t : vcpu_threads_) {
         if (t.joinable()) t.join();
     }
@@ -408,19 +404,6 @@ bool Vm::SetupVirtioSnd(const VirtioDeviceSlot& slot) {
     return true;
 }
 
-void Vm::InputThreadFunc() {
-    if (!console_port_) return;
-
-    uint8_t buf[32]{};
-    while (running_) {
-        size_t n = console_port_->Read(buf, sizeof(buf));
-        if (n == 0) {
-            continue;
-        }
-        machine_->InjectConsoleInput(buf, n);
-    }
-}
-
 void Vm::VCpuThreadFunc(uint32_t vcpu_index) {
 #ifdef __APPLE__
     auto created = hv_vm_->CreateVCpu(vcpu_index, &addr_space_);
@@ -508,60 +491,9 @@ void Vm::VCpuThreadFunc(uint32_t vcpu_index) {
              vcpu_index, (unsigned long long)exit_count);
 }
 
-void Vm::HidInputThreadFunc() {
-    if (!input_port_) return;
-
-    uint32_t prev_buttons = 0;
-
-    while (running_) {
-        KeyboardEvent kev;
-        while (input_port_->PollKeyboard(&kev)) {
-            if (virtio_kbd_) {
-                virtio_kbd_->InjectEvent(EV_KEY, static_cast<uint16_t>(kev.key_code),
-                                         kev.pressed ? 1 : 0, false);
-                virtio_kbd_->InjectEvent(EV_SYN, SYN_REPORT, 0, true);
-            }
-        }
-
-        PointerEvent pev;
-        while (input_port_->PollPointer(&pev)) {
-            if (virtio_tablet_) {
-                virtio_tablet_->InjectEvent(EV_ABS, ABS_X,
-                    static_cast<uint32_t>(pev.x), false);
-                virtio_tablet_->InjectEvent(EV_ABS, ABS_Y,
-                    static_cast<uint32_t>(pev.y), false);
-
-                uint32_t btns = pev.buttons;
-                if ((btns & 1) != (prev_buttons & 1))
-                    virtio_tablet_->InjectEvent(EV_KEY, BTN_LEFT,
-                        (btns & 1) ? 1 : 0, false);
-                if ((btns & 2) != (prev_buttons & 2))
-                    virtio_tablet_->InjectEvent(EV_KEY, BTN_RIGHT,
-                        (btns & 2) ? 1 : 0, false);
-                if ((btns & 4) != (prev_buttons & 4))
-                    virtio_tablet_->InjectEvent(EV_KEY, BTN_MIDDLE,
-                        (btns & 4) ? 1 : 0, false);
-                prev_buttons = btns;
-
-                virtio_tablet_->InjectEvent(EV_SYN, SYN_REPORT, 0, true);
-            }
-        }
-
-        VmPlatform::SleepMs(2);
-    }
-}
-
 int Vm::Run() {
     running_ = true;
     LOG_INFO("Starting VM execution...");
-
-    if (console_port_) {
-        input_thread_ = std::thread(&Vm::InputThreadFunc, this);
-    }
-
-    if (input_port_) {
-        hid_input_thread_ = std::thread(&Vm::HidInputThreadFunc, this);
-    }
 
     for (uint32_t i = 0; i < cpu_count_; i++) {
         vcpu_threads_.emplace_back(&Vm::VCpuThreadFunc, this, i);

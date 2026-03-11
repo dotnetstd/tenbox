@@ -95,8 +95,6 @@ private:
     bool SetupVirtioFs(const std::vector<VmSharedFolder>& initial_folders, const VirtioDeviceSlot& slot);
     bool SetupVirtioSnd(const VirtioDeviceSlot& slot);
 
-    void InputThreadFunc();
-    void HidInputThreadFunc();
     void VCpuThreadFunc(uint32_t vcpu_index);
     void InjectIrq(uint8_t irq);
     void SetIrqLevel(uint8_t irq, bool asserted);
@@ -142,8 +140,6 @@ private:
 
     std::atomic<bool> running_{false};
     std::atomic<bool> reboot_requested_{false};
-    std::thread input_thread_;
-    std::thread hid_input_thread_;
     std::shared_ptr<ConsolePort> console_port_;
     std::shared_ptr<InputPort> input_port_;
     std::shared_ptr<DisplayPort> display_port_;
