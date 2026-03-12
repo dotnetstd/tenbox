@@ -2,15 +2,16 @@
 #include "core/vmm/vm_platform.h"
 #include <algorithm>
 
-#ifdef _WIN32
+#if defined(_WIN32) || (defined(__APPLE__) && defined(__x86_64__))
 #include "core/arch/x86_64/x86_machine.h"
+#include "platform/macos/hypervisor/x86_64/hvf_vcpu.h"
 #elif defined(__APPLE__) && defined(__aarch64__)
 #include "core/arch/aarch64/aarch64_machine.h"
-#include "platform/macos/hypervisor/hvf_vcpu.h"
+#include "platform/macos/hypervisor/aarch64/hvf_vcpu.h"
 #endif
 
 static std::unique_ptr<MachineModel> CreateMachineModel() {
-#ifdef _WIN32
+#if defined(_WIN32) || (defined(__APPLE__) && defined(__x86_64__))
     return std::make_unique<X86Machine>();
 #elif defined(__APPLE__) && defined(__aarch64__)
     return std::make_unique<Aarch64Machine>();
@@ -24,7 +25,7 @@ static std::string GetDefaultCmdline() {
 #ifdef __aarch64__
     return "console=ttyAMA0 earlycon root=/dev/vda1 rw";
 #else
-    return "console=ttyS0 earlyprintk=serial lapic no_timer_check tsc=reliable i8042.noprobe";
+    return "console=ttyS0 earlyprintk=serial lapic tsc=reliable clocksource=kvm-clock no_timer_check i8042.noprobe";
 #endif
 }
 
@@ -83,6 +84,8 @@ std::unique_ptr<Vm> Vm::Create(const VmConfig& config) {
     uint64_t ram_bytes = config.memory_mb * 1024 * 1024;
     if (!vm->AllocateMemory(ram_bytes)) return nullptr;
 
+    vm->hv_vm_->SetGuestMemMap(&vm->mem_);
+
     if (!vm->machine_->SetupPlatformDevices(
             vm->addr_space_, vm->mem_, vm->hv_vm_.get(),
             vm->console_port_,
@@ -91,6 +94,45 @@ std::unique_ptr<Vm> Vm::Create(const VmConfig& config) {
         LOG_ERROR("Failed to set up platform devices");
         return nullptr;
     }
+
+#if defined(__APPLE__) && defined(__x86_64__)
+    {
+        auto* x86m = dynamic_cast<X86Machine*>(vm->machine_.get());
+        if (x86m) {
+            x86m->InitLapic(config.cpu_count);
+            x86m->SetInitCallback([&vm_ref = *vm](uint32_t target_cpu) {
+                if (target_cpu >= vm_ref.cpu_count_) return;
+                auto& state = vm_ref.secondary_cpu_states_[target_cpu];
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->init_received = true;
+            });
+            x86m->SetSipiCallback([&vm_ref = *vm](uint32_t target_cpu, uint8_t vector) {
+                if (target_cpu >= vm_ref.cpu_count_) return;
+                auto& state = vm_ref.secondary_cpu_states_[target_cpu];
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (!state->init_received) return;
+                if (state->powered_on) return;
+                state->sipi_vector = vector;
+                state->powered_on = true;
+                state->cv.notify_one();
+            });
+            x86m->SetIpiCallback([&vm_ref = *vm](uint32_t vector, uint32_t dest, uint8_t shorthand) {
+                uint32_t sender = LocalApic::GetCurrentCpu();
+                if (shorthand == 0) {
+                    vm_ref.hv_vm_->QueueInterrupt(vector, dest);
+                } else if (shorthand == 1) {
+                    vm_ref.hv_vm_->QueueInterrupt(vector, sender);
+                } else if (shorthand == 2) {
+                    for (uint32_t i = 0; i < vm_ref.cpu_count_; i++)
+                        vm_ref.hv_vm_->QueueInterrupt(vector, i);
+                } else if (shorthand == 3) {
+                    for (uint32_t i = 0; i < vm_ref.cpu_count_; i++)
+                        if (i != sender) vm_ref.hv_vm_->QueueInterrupt(vector, i);
+                }
+            });
+        }
+    }
+#endif
 
     auto slots = vm->machine_->GetVirtioSlots();
 
@@ -128,9 +170,10 @@ std::unique_ptr<Vm> Vm::Create(const VmConfig& config) {
 
     vm->cpu_count_ = config.cpu_count;
 
-#if defined(__APPLE__) && defined(__aarch64__)
+#ifdef __APPLE__
+    // macOS HVF requires vCPU creation on the thread that will run it.
+    // Defer creation to VCpuThreadFunc.
     vm->vcpus_.resize(config.cpu_count);
-    // Allocate per-CPU state for secondary PSCI wakeup
     vm->secondary_cpu_states_.resize(config.cpu_count);
     for (uint32_t i = 0; i < config.cpu_count; i++) {
         vm->secondary_cpu_states_[i] = std::make_unique<Vm::SecondaryCpuState>();
@@ -405,7 +448,9 @@ bool Vm::SetupVirtioSnd(const VirtioDeviceSlot& slot) {
 }
 
 void Vm::VCpuThreadFunc(uint32_t vcpu_index) {
-#if defined(__APPLE__) && defined(__aarch64__)
+    LocalApic::SetCurrentCpu(vcpu_index);
+#ifdef __APPLE__
+    // macOS HVF: create vCPU on this thread (required by Hypervisor.framework)
     auto created = hv_vm_->CreateVCpu(vcpu_index, &addr_space_);
     if (!created) {
         LOG_ERROR("vCPU %u: failed to create on thread", vcpu_index);
@@ -414,20 +459,21 @@ void Vm::VCpuThreadFunc(uint32_t vcpu_index) {
     }
     vcpus_[vcpu_index] = std::move(created);
 
-    // Set up PSCI callbacks
+#if defined(__aarch64__)
+    // ARM64: set up PSCI callbacks
     {
         auto* hvf_vcpu = dynamic_cast<hvf::HvfVCpu*>(vcpus_[vcpu_index].get());
         if (hvf_vcpu) {
             hvf_vcpu->SetPsciCpuOnCallback([this](const hvf::PsciCpuOnRequest& req) -> int {
-                if (req.target_cpu >= cpu_count_) return -2;  // INVALID_PARAMETERS
+                if (req.target_cpu >= cpu_count_) return -2;
                 auto& state = secondary_cpu_states_[req.target_cpu];
                 std::lock_guard<std::mutex> lock(state->mutex);
-                if (state->powered_on) return -4;  // ALREADY_ON
+                if (state->powered_on) return -4;
                 state->entry_addr = req.entry_addr;
                 state->context_id = req.context_id;
                 state->powered_on = true;
                 state->cv.notify_one();
-                return 0;  // SUCCESS
+                return 0;
             });
             hvf_vcpu->SetPsciShutdownCallback([this]() {
                 RequestStop();
@@ -456,7 +502,31 @@ void Vm::VCpuThreadFunc(uint32_t vcpu_index) {
             hvf_vcpu->SetupSecondaryCpu(state->entry_addr, state->context_id);
         }
     }
-#endif
+#else
+    // x86_64: BSP sets up boot registers; APs wait for INIT/SIPI
+    if (vcpu_index == 0) {
+        if (!machine_->SetupBootVCpu(vcpus_[0].get(), mem_.base)) {
+            LOG_ERROR("Failed to set initial vCPU registers");
+            RequestStop();
+            return;
+        }
+    } else {
+        // AP vCPU: wait for SIPI from BSP via LAPIC ICR
+        LOG_INFO("vCPU %u (AP): waiting for INIT/SIPI", vcpu_index);
+        auto& state = secondary_cpu_states_[vcpu_index];
+        std::unique_lock<std::mutex> lock(state->mutex);
+        state->cv.wait(lock, [&]() { return state->powered_on || !running_; });
+        if (!running_) return;
+
+        auto* hvf_vcpu = dynamic_cast<hvf::HvfVCpu*>(vcpus_[vcpu_index].get());
+        if (hvf_vcpu) {
+            hvf_vcpu->SetupSipiRegisters(state->sipi_vector);
+        }
+        LOG_INFO("vCPU %u (AP): SIPI received, starting execution at vector 0x%02x",
+                 vcpu_index, state->sipi_vector);
+    }
+#endif // __aarch64__
+#endif // __APPLE__
     auto& vcpu = vcpus_[vcpu_index];
     uint64_t exit_count = 0;
 
@@ -469,7 +539,7 @@ void Vm::VCpuThreadFunc(uint32_t vcpu_index) {
             break;
 
         case VCpuExitAction::kHalt:
-            VmPlatform::YieldCpu();
+            vcpu->WaitForInterrupt(100);
             break;
 
         case VCpuExitAction::kShutdown:

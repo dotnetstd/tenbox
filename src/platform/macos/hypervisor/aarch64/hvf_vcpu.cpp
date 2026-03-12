@@ -1,5 +1,5 @@
-#include "platform/macos/hypervisor/hvf_vcpu.h"
-#include "platform/macos/hypervisor/hvf_mmio_decode.h"
+#include "platform/macos/hypervisor/aarch64/hvf_vcpu.h"
+#include "platform/macos/hypervisor/aarch64/hvf_mmio_decode.h"
 #include "core/vmm/types.h"
 
 namespace hvf {
@@ -33,15 +33,11 @@ std::unique_ptr<HvfVCpu> HvfVCpu::Create(uint32_t index, AddressSpace* addr_spac
     }
     vcpu->created_ = true;
 
-    // Set MPIDR_EL1 (affinity) — required for GICv3 redistributor routing.
-    // Use Aff0 = index for simple topology.
     uint64_t mpidr = static_cast<uint64_t>(index) & 0xFF;
     hv_vcpu_set_sys_reg(vcpu->vcpu_, HV_SYS_REG_MPIDR_EL1, mpidr);
 
-    // Trap debug exceptions so BRK causes a VM exit
     hv_vcpu_set_trap_debug_exceptions(vcpu->vcpu_, true);
 
-    // Query the vtimer INTID from the GIC for PPI injection
     uint32_t vtimer_intid = 0;
     hv_return_t gic_ret = hv_gic_get_intid(HV_GIC_INT_EL1_VIRTUAL_TIMER, &vtimer_intid);
     if (gic_ret == HV_SUCCESS) {
@@ -57,12 +53,10 @@ std::unique_ptr<HvfVCpu> HvfVCpu::Create(uint32_t index, AddressSpace* addr_spac
 }
 
 VCpuExitAction HvfVCpu::RunOnce() {
-    // Sync vtimer state: if masked, check if guest has cleared the interrupt
-    // (CNTV_CTL_EL0.ISTATUS=0 or ENABLE=0 or IMASK=1) and unmask.
     if (vtimer_masked_) {
         uint64_t ctl = 0;
         hv_vcpu_get_sys_reg(vcpu_, HV_SYS_REG_CNTV_CTL_EL0, &ctl);
-        bool irq_asserted = (ctl & 0x7) == 0x5;  // ENABLE=1, IMASK=0, ISTATUS=1
+        bool irq_asserted = (ctl & 0x7) == 0x5;
         if (!irq_asserted) {
             hv_vcpu_set_vtimer_mask(vcpu_, false);
             vtimer_masked_ = false;
@@ -84,10 +78,8 @@ VCpuExitAction HvfVCpu::RunOnce() {
 
     case HV_EXIT_REASON_VTIMER_ACTIVATED:
     {
-        // VTimer fired. HVF auto-masks the vtimer on this exit.
         vtimer_masked_ = true;
 
-        // Set PPI pending in GIC redistributor via GICR_ISPENDR0
         uint32_t ppi_bit = 1u << vtimer_intid_;
         hv_return_t gic_ret = hv_gic_set_redistributor_reg(vcpu_,
             HV_GIC_REDISTRIBUTOR_REG_GICR_ISPENDR0, ppi_bit);
@@ -110,8 +102,6 @@ void HvfVCpu::CancelRun() {
 }
 
 bool HvfVCpu::SetupBootRegisters(uint8_t* /*ram*/) {
-    // ARM64 boot registers are set up via SetupAarch64Boot().
-    // This x86-oriented method is a no-op on ARM64.
     return true;
 }
 
@@ -173,7 +163,6 @@ VCpuExitAction HvfVCpu::HandleException() {
         return HandleHvc();
 
     case kEcSysReg:
-        // System register access trap — skip the instruction
         {
             uint64_t pc;
             hv_vcpu_get_reg(vcpu_, HV_REG_PC, &pc);
@@ -212,8 +201,6 @@ VCpuExitAction HvfVCpu::HandleHvc() {
 
     uint32_t func_id = static_cast<uint32_t>(x0);
 
-    // HVF advances PC past HVC/SMC automatically on exception exit;
-    // do NOT add 4 here.
     uint64_t pc;
     hv_vcpu_get_reg(vcpu_, HV_REG_PC, &pc);
 
@@ -233,9 +220,9 @@ VCpuExitAction HvfVCpu::HandleHvc() {
         if (queried == kPsciCpuOn64 || queried == kPsciCpuOff ||
             queried == kPsciSystemOff || queried == kPsciSystemReset ||
             queried == kPsciVersion) {
-            hv_vcpu_set_reg(vcpu_, HV_REG_X0, 0);  // supported
+            hv_vcpu_set_reg(vcpu_, HV_REG_X0, 0);
         } else {
-            hv_vcpu_set_reg(vcpu_, HV_REG_X0, static_cast<uint64_t>(-1LL));  // not supported
+            hv_vcpu_set_reg(vcpu_, HV_REG_X0, static_cast<uint64_t>(-1LL));
         }
         return VCpuExitAction::kContinue;
     }
@@ -243,11 +230,11 @@ VCpuExitAction HvfVCpu::HandleHvc() {
     case kPsciCpuOn64:
     {
         PsciCpuOnRequest req;
-        req.target_cpu = static_cast<uint32_t>(x1 & 0xFF);  // Aff0
+        req.target_cpu = static_cast<uint32_t>(x1 & 0xFF);
         req.entry_addr = x2;
         req.context_id = x3;
 
-        int result = -2;  // PSCI_RET_INVALID_PARAMETERS
+        int result = -2;
         if (psci_cpu_on_cb_) {
             result = psci_cpu_on_cb_(req);
         }
@@ -271,7 +258,6 @@ VCpuExitAction HvfVCpu::HandleHvc() {
         return VCpuExitAction::kShutdown;
 
     default:
-        // Unknown PSCI/HVC call — return NOT_SUPPORTED
         hv_vcpu_set_reg(vcpu_, HV_REG_X0, static_cast<uint64_t>(-1LL));
         return VCpuExitAction::kContinue;
     }
@@ -280,13 +266,11 @@ VCpuExitAction HvfVCpu::HandleHvc() {
 VCpuExitAction HvfVCpu::HandleDataAbort(uint64_t syndrome) {
     uint64_t gpa = vcpu_exit_->exception.physical_address;
 
-    // Read all general-purpose registers for instruction decode
     uint64_t regs[31] = {};
     for (int i = 0; i < 31; i++) {
         hv_vcpu_get_reg(vcpu_, static_cast<hv_reg_t>(HV_REG_X0 + i), &regs[i]);
     }
 
-    // Try ISV fast path first, fall back to instruction decode
     MmioDecodeResult decode{};
     bool isv = (syndrome >> 24) & 1;
 
@@ -301,26 +285,16 @@ VCpuExitAction HvfVCpu::HandleDataAbort(uint64_t syndrome) {
             decode.write_value = (decode.reg == 31) ? 0 : regs[decode.reg];
         }
     } else {
-        // Must decode the instruction from guest memory
         uint64_t pc;
         hv_vcpu_get_reg(vcpu_, HV_REG_PC, &pc);
 
-        // Fetch the 4-byte instruction from guest memory
-        // PC is a virtual address, but since we're at EL1 with identity mapping
-        // during early boot, we can use it as a physical address hint.
-        // For a proper implementation, we'd need to walk page tables.
-        // For now, assume the instruction is accessible at the faulting PC.
         uint64_t far_el2 = vcpu_exit_->exception.virtual_address;
         (void)far_el2;
 
-        // Read the instruction from ELR_EL2 (which is the guest PC)
-        // This requires the PC to be in mapped guest memory.
-        // TODO: implement proper instruction fetch from guest virtual address
         LOG_WARN("hvf: vCPU %u DABT without ISV at GPA=0x%llx — "
                  "instruction decode not yet fully implemented",
                  index_, (unsigned long long)gpa);
 
-        // Advance PC past the faulting instruction and continue
         hv_vcpu_set_reg(vcpu_, HV_REG_PC, pc + 4);
         return VCpuExitAction::kContinue;
     }
@@ -337,13 +311,11 @@ VCpuExitAction HvfVCpu::HandleDataAbort(uint64_t syndrome) {
             LOG_WARN("hvf: unhandled MMIO read at GPA=0x%llx size=%u",
                      (unsigned long long)gpa, decode.access_size);
         }
-        // Write the value back to the destination register
         if (decode.reg < 31) {
             hv_vcpu_set_reg(vcpu_, static_cast<hv_reg_t>(HV_REG_X0 + decode.reg), value);
         }
     }
 
-    // Advance PC past the faulting instruction
     uint64_t pc;
     hv_vcpu_get_reg(vcpu_, HV_REG_PC, &pc);
     hv_vcpu_set_reg(vcpu_, HV_REG_PC, pc + 4);

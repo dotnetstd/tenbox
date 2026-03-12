@@ -1,5 +1,5 @@
-#include "platform/macos/hypervisor/hvf_vm.h"
-#include "platform/macos/hypervisor/hvf_vcpu.h"
+#include "platform/macos/hypervisor/aarch64/hvf_vm.h"
+#include "platform/macos/hypervisor/aarch64/hvf_vcpu.h"
 #include "core/vmm/types.h"
 
 #include <Hypervisor/Hypervisor.h>
@@ -21,7 +21,6 @@ std::unique_ptr<HvfVm> HvfVm::Create(uint32_t cpu_count) {
     auto vm = std::unique_ptr<HvfVm>(new HvfVm());
     vm->cpu_count_ = cpu_count;
 
-    // #region agent log — query GIC hardware parameters
     {
         size_t dist_size = 0, dist_align = 0;
         size_t redist_region_size = 0, redist_size = 0, redist_align = 0;
@@ -42,7 +41,6 @@ std::unique_ptr<HvfVm> HvfVm::Create(uint32_t cpu_count) {
                  redist_region_size, redist_size, redist_align,
                  msi_sz, msi_align, spi_base, spi_count);
     }
-    // #endregion
 
     hv_gic_config_t gic_config = hv_gic_config_create();
     if (!gic_config) {
@@ -50,19 +48,16 @@ std::unique_ptr<HvfVm> HvfVm::Create(uint32_t cpu_count) {
         return nullptr;
     }
 
-    // Query actual sizes to calculate proper layout
     size_t dist_size = 0;
     hv_gic_get_distributor_size(&dist_size);
     if (dist_size == 0) dist_size = 0x10000;
 
-    // Use the full redistributor region size required by HVF
     size_t redist_region_size = 0;
     hv_gic_get_redistributor_region_size(&redist_region_size);
     size_t redist_per_cpu = 0;
     hv_gic_get_redistributor_size(&redist_per_cpu);
     if (redist_per_cpu == 0) redist_per_cpu = 0x20000;
 
-    // Place redistributor right after distributor, properly aligned
     size_t redist_align = 0;
     hv_gic_get_redistributor_base_alignment(&redist_align);
     if (redist_align == 0) redist_align = 0x10000;
@@ -87,7 +82,6 @@ std::unique_ptr<HvfVm> HvfVm::Create(uint32_t cpu_count) {
         LOG_ERROR("hvf: set redistributor base failed: %d", (int)ret);
     }
 
-    // Configure MSI region after the full redistributor region
     size_t msi_size = 0;
     hv_gic_get_msi_region_size(&msi_size);
     if (msi_size > 0) {
@@ -122,7 +116,6 @@ std::unique_ptr<HvfVm> HvfVm::Create(uint32_t cpu_count) {
     }
     vm->gic_created_ = true;
 
-    // Store actual addresses for FDT generation
     vm->redist_base_ = actual_redist_base;
     vm->redist_size_per_cpu_ = redist_per_cpu;
 
@@ -159,7 +152,6 @@ std::unique_ptr<HypervisorVCpu> HvfVm::CreateVCpu(
 }
 
 void HvfVm::RequestInterrupt(const InterruptRequest& req) {
-    // On ARM64 with GICv3, level_triggered carries the assert/deassert state.
     hv_return_t ret = hv_gic_set_spi(req.vector, req.level_triggered);
     if (ret != HV_SUCCESS) {
         LOG_WARN("hvf: hv_gic_set_spi(%u, %s) failed: %d",

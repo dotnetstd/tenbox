@@ -1,7 +1,12 @@
 #include "core/vmm/vm_platform.h"
 #include "platform/macos/console/posix_console_port.h"
 #include "platform/macos/hypervisor/hvf_platform.h"
-#include "platform/macos/hypervisor/hvf_vm.h"
+
+#ifdef __aarch64__
+#include "platform/macos/hypervisor/aarch64/hvf_vm.h"
+#else
+#include "platform/macos/hypervisor/x86_64/hvf_vm.h"
+#endif
 
 #include <sys/mman.h>
 #include <sys/sysctl.h>

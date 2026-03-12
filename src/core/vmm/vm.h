@@ -147,13 +147,16 @@ private:
     std::shared_ptr<AudioPort> audio_port_;
     uint32_t inject_prev_buttons_ = 0;
 
-    // PSCI CPU_ON support for secondary vCPUs
+    // Secondary vCPU state: PSCI CPU_ON (aarch64), INIT/SIPI (x86_64)
     struct SecondaryCpuState {
         std::mutex mutex;
         std::condition_variable cv;
         bool powered_on = false;
         uint64_t entry_addr = 0;
         uint64_t context_id = 0;
+        // x86 INIT/SIPI
+        bool init_received = false;
+        uint8_t sipi_vector = 0;
     };
     std::vector<std::unique_ptr<SecondaryCpuState>> secondary_cpu_states_;
 };

@@ -87,7 +87,7 @@ set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_SAVED})
 if(MSVC)
     target_compile_options(lwipcore PRIVATE /W0)
 else()
-    target_compile_options(lwipcore PRIVATE -w)
+    target_compile_options(lwipcore PRIVATE -w -fcommon)
 endif()
 
 configure_file(src/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/version.h)

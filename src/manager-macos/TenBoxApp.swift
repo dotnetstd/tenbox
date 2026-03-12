@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 import Sparkle
 
 let kTenBoxVersion: String = {
@@ -123,6 +124,7 @@ class AppState: ObservableObject {
 
     private var bridge = TenBoxBridgeWrapper()
     private var activeSessions: [String: VmSession] = [:]
+    private var sessionCancellables: [String: AnyCancellable] = [:]
     private var stateObserver: NSObjectProtocol?
     private var pendingVmStartId: String?
 
@@ -136,10 +138,15 @@ class AppState: ObservableObject {
             self.refreshVmList()
             if let vmId = note.object as? String {
                 let newState = self.vms.first(where: { $0.id == vmId })?.state ?? .stopped
-                if newState == .stopped || newState == .crashed || newState == .rebooting {
+                if newState == .rebooting {
                     self.removeSession(for: vmId)
+                } else if newState == .stopped || newState == .crashed {
+                    // Disconnect but keep session so console output stays visible
+                    self.activeSessions[vmId]?.disconnect()
                 } else if newState == .running {
                     let session = self.getOrCreateSession(for: vmId)
+                    // Clear stale console output from the previous run before reconnecting
+                    session.consoleText = ""
                     session.connectIfNeeded()
                 }
             }
@@ -160,6 +167,9 @@ class AppState: ObservableObject {
         if let vm = vms.first(where: { $0.id == vmId }) {
             session.displayScale = vm.displayScale
         }
+        sessionCancellables[vmId] = session.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
         activeSessions[vmId] = session
         return session
     }
@@ -176,6 +186,7 @@ class AppState: ObservableObject {
         if let session = activeSessions[vmId] {
             session.disconnect()
         }
+        sessionCancellables.removeValue(forKey: vmId)
         activeSessions.removeValue(forKey: vmId)
     }
 

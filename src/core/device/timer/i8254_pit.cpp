@@ -54,7 +54,56 @@ uint64_t I8254Pit::MeasureTscFrequency() {
     return freq;
 }
 
-I8254Pit::I8254Pit() : tsc_freq_(MeasureTscFrequency()) {}
+I8254Pit::I8254Pit() : tsc_freq_(MeasureTscFrequency()) {
+#ifdef __APPLE__
+    ch0_queue_ = dispatch_queue_create("pit.ch0", DISPATCH_QUEUE_SERIAL);
+#endif
+}
+
+I8254Pit::~I8254Pit() {
+    StopChannel0Timer();
+#ifdef __APPLE__
+    if (ch0_queue_) {
+        dispatch_release(ch0_queue_);
+        ch0_queue_ = nullptr;
+    }
+#endif
+}
+
+void I8254Pit::StopChannel0Timer() {
+#ifdef __APPLE__
+    if (ch0_timer_) {
+        dispatch_source_cancel(ch0_timer_);
+        dispatch_release(ch0_timer_);
+        ch0_timer_ = nullptr;
+    }
+#endif
+}
+
+void I8254Pit::ArmChannel0Timer() {
+#ifdef __APPLE__
+    StopChannel0Timer();
+    auto& ch = channels_[0];
+    if (!ch.armed || ch.reload == 0) return;
+    if (ch.mode != 2 && ch.mode != 3) return;
+
+    uint32_t reload = (ch.reload == 0) ? 65536u : static_cast<uint32_t>(ch.reload);
+    // Period in nanoseconds: reload / 1193182 Hz * 1e9
+    uint64_t period_ns = static_cast<uint64_t>(
+        static_cast<double>(reload) / kPitFrequencyHz * 1e9);
+    if (period_ns < 100000) period_ns = 100000; // floor at 100us
+
+    ch0_timer_ = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, ch0_queue_);
+    dispatch_source_set_timer(ch0_timer_,
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)period_ns),
+        period_ns, 0);
+    dispatch_source_set_event_handler(ch0_timer_, ^{
+        if (irq_callback_) irq_callback_();
+    });
+    dispatch_resume(ch0_timer_);
+#endif
+}
 
 uint64_t I8254Pit::ElapsedPitTicks(int ch) const {
     auto& c = channels_[ch];
@@ -181,6 +230,10 @@ void I8254Pit::PioWrite(uint16_t offset, uint8_t size, uint32_t value) {
             ch.armed = true;
             ch.start_tsc = __rdtsc();
         }
+    }
+
+    if (offset == 0 && ch.armed) {
+        ArmChannel0Timer();
     }
 }
 
