@@ -1,18 +1,18 @@
 {
-  "latest_version": "0.4.1",
+  "latest_version": "0.4.2",
   "min_supported_version": "0.1.0",
-  "release_notes": "重构创建虚拟机的镜像列表\n基于事件驱动的通信优化性能\n动态调整 DNS",
-  "release_date": "2026-03-11",
-  "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.4.1.msi",
-  "sha256": "d3bea25533229b374f65aeae218028c58fefe1000a332ae6ca457283f24f2365",
+  "release_notes": "支持虚拟机通过 10.0.2.2 访问主机服务\n默认关闭 Linux 内核日志\n优化设备性能",
+  "release_date": "2026-03-13",
+  "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.4.2.msi",
+  "sha256": "1cf0bdfb4474f4f275378370c59f64a61751acdc3d8c8a25c2839e0eb93a9018",
   "platforms": {
     "windows": {
-      "latest_version": "0.4.1",
-      "release_notes": "重构创建虚拟机的镜像列表\n基于事件驱动的通信优化性能\n动态调整 DNS",
-      "release_date": "2026-03-11",
-      "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.4.1.msi",
-      "sha256": "d3bea25533229b374f65aeae218028c58fefe1000a332ae6ca457283f24f2365",
-      "size": 2142208,
+      "latest_version": "0.4.2",
+      "release_notes": "支持虚拟机通过 10.0.2.2 访问主机服务\n默认关闭 Linux 内核日志\n优化设备性能",
+      "release_date": "2026-03-13",
+      "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox_0.4.2.msi",
+      "sha256": "1cf0bdfb4474f4f275378370c59f64a61751acdc3d8c8a25c2839e0eb93a9018",
+      "size": 2162688,
       "min_os": "Windows 10"
     },
     "macos": {
