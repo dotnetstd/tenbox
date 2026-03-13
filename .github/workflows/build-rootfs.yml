@@ -41,6 +41,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Show disk space
+        run: df -h
+
       - name: Build
         run: ./scripts/docker/build.sh x86_64 ${{ inputs.target }}
 
@@ -103,6 +106,9 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+
+      - name: Show disk space
+        run: df -h
 
       - name: Build
         run: ./scripts/docker/build.sh arm64 ${{ inputs.target }}
