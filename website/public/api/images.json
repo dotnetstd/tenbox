@@ -20,8 +20,8 @@
         {
           "name": "initrd.gz",
           "url": "https://files.xiaozhi.me/tenbox/images/initramfs/initramfs-x86_64.cpio.gz",
-          "sha256": "25f93b5f17f8f88839c7beccaee4f6a3c66ccc5a56f53079e1546bf2ab74744b",
-          "size": 1693120
+          "sha256": "4c3baafb3d4ed3aa6323adbd2e18022051309f2d6a13496e1cb14132e5e7c85a",
+          "size": 3217912
         },
         {
           "name": "rootfs.qcow2",
@@ -51,8 +51,8 @@
         {
           "name": "initrd.gz",
           "url": "https://files.xiaozhi.me/tenbox/images/initramfs/initramfs-x86_64.cpio.gz",
-          "sha256": "25f93b5f17f8f88839c7beccaee4f6a3c66ccc5a56f53079e1546bf2ab74744b",
-          "size": 1693120
+          "sha256": "4c3baafb3d4ed3aa6323adbd2e18022051309f2d6a13496e1cb14132e5e7c85a",
+          "size": 3217912
         },
         {
           "name": "rootfs.qcow2",
@@ -82,8 +82,8 @@
         {
           "name": "initrd.gz",
           "url": "https://files.xiaozhi.me/tenbox/images/initramfs/initramfs-x86_64.cpio.gz",
-          "sha256": "25f93b5f17f8f88839c7beccaee4f6a3c66ccc5a56f53079e1546bf2ab74744b",
-          "size": 1693120
+          "sha256": "4c3baafb3d4ed3aa6323adbd2e18022051309f2d6a13496e1cb14132e5e7c85a",
+          "size": 3217912
         },
         {
           "name": "rootfs.qcow2",
@@ -113,8 +113,8 @@
         {
           "name": "initrd.gz",
           "url": "https://files.xiaozhi.me/tenbox/images/initramfs-arm64/initramfs-arm64.cpio.gz",
-          "sha256": "2dffba852bc76beee2bc324957e50ce87713bce9bb21d6584ba5aff2e5ee2e4d",
-          "size": 1558700
+          "sha256": "1186665a628232258404f71aada8ea2a5a2978d5609a547112ee654479f202e7",
+          "size": 2941643
         },
         {
           "name": "rootfs.qcow2",
@@ -144,8 +144,8 @@
         {
           "name": "initrd.gz",
           "url": "https://files.xiaozhi.me/tenbox/images/initramfs-arm64/initramfs-arm64.cpio.gz",
-          "sha256": "2dffba852bc76beee2bc324957e50ce87713bce9bb21d6584ba5aff2e5ee2e4d",
-          "size": 1558700
+          "sha256": "1186665a628232258404f71aada8ea2a5a2978d5609a547112ee654479f202e7",
+          "size": 2941643
         },
         {
           "name": "rootfs.qcow2",
@@ -175,8 +175,8 @@
         {
           "name": "initrd.gz",
           "url": "https://files.xiaozhi.me/tenbox/images/initramfs-arm64/initramfs-arm64.cpio.gz",
-          "sha256": "2dffba852bc76beee2bc324957e50ce87713bce9bb21d6584ba5aff2e5ee2e4d",
-          "size": 1558700
+          "sha256": "1186665a628232258404f71aada8ea2a5a2978d5609a547112ee654479f202e7",
+          "size": 2941643
         },
         {
           "name": "rootfs.qcow2",
