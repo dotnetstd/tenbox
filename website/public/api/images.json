@@ -9,7 +9,7 @@
       "os": "linux",
       "arch": "microvm",
       "platform": "x86_64",
-      "updated_at": "2026-03-14",
+      "updated_at": "2026-03-18",
       "files": [
         {
           "name": "vmlinuz",
@@ -25,9 +25,9 @@
         },
         {
           "name": "rootfs.qcow2",
-          "url": "https://files.xiaozhi.me/tenbox/images/openclaw/rootfs-openclaw-2026.3.13.qcow2",
-          "sha256": "e1df7ec2f5c04363d13a3eb96c2792df1f9f87b302038429f3117ed2858fa8ed",
-          "size": 1650107904
+          "url": "https://files.xiaozhi.me/tenbox/images/openclaw/rootfs-openclaw-2026.3.13-x86_64.qcow2",
+          "sha256": "2ec45a0372613ae49b83ae7845174e7be1e8af32100eac78807fa32e08854b68",
+          "size": 1634079232
         }
       ]
     },
@@ -164,7 +164,7 @@
       "os": "linux",
       "arch": "microvm",
       "platform": "arm64",
-      "updated_at": "2026-03-14",
+      "updated_at": "2026-03-18",
       "files": [
         {
           "name": "vmlinuz",
@@ -180,9 +180,9 @@
         },
         {
           "name": "rootfs.qcow2",
-          "url": "https://files.xiaozhi.me/tenbox/images/openclaw-arm64/rootfs-openclaw-arm64-2026.3.13.qcow2",
-          "sha256": "4234c329d746a9eb3702957996ce76a8834faacacb0dd21965ef5ed9855615eb",
-          "size": 1650262016
+          "url": "https://files.xiaozhi.me/tenbox/images/openclaw-arm64/rootfs-openclaw-2026.3.13-arm64.qcow2",
+          "sha256": "e79525878b80c215376bddee06d0b718a3d97d7fc0062131b606d85b6839f698",
+          "size": 1688545792
         }
       ]
     }
