@@ -1,5 +1,6 @@
 #include "core/arch/aarch64/aarch64_machine.h"
 #include "core/arch/aarch64/fdt_builder.h"
+#include "core/device/irq/gicv3.h"
 #include "core/vmm/vm.h"
 #include <cstring>
 #include <cstdio>
@@ -38,6 +39,18 @@ bool Aarch64Machine::SetupPlatformDevices(
         SetIrqLevel(hv_vm_, kRtcIrq, asserted);
     });
     addr_space.AddMmioDevice(kRtcBase, Pl031Rtc::kMmioSize, &rtc_);
+
+    // Register software GICv3 MMIO if HVF GIC is not available
+#ifdef __APPLE__
+    if (hv_vm) {
+        auto* hvf = dynamic_cast<hvf::HvfVm*>(hv_vm);
+        if (hvf && hvf->UsesSoftGic()) {
+            hvf->GetSoftGic()->RegisterDevices(addr_space, kGicDistBase, kGicRedistBase);
+            LOG_INFO("aarch64: software GICv3 MMIO registered at dist=0x%llx redist=0x%llx",
+                     (unsigned long long)kGicDistBase, (unsigned long long)kGicRedistBase);
+        }
+    }
+#endif
 
     return true;
 }

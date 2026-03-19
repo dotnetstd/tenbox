@@ -10,6 +10,8 @@
 
 #include <Hypervisor/Hypervisor.h>
 
+namespace gicv3 { class SoftGic; }
+
 namespace hvf {
 
 // PSCI function IDs (SMC Calling Convention)
@@ -34,7 +36,8 @@ class HvfVCpu final : public HypervisorVCpu {
 public:
     ~HvfVCpu() override;
 
-    static std::unique_ptr<HvfVCpu> Create(uint32_t index, AddressSpace* addr_space);
+    static std::unique_ptr<HvfVCpu> Create(uint32_t index, AddressSpace* addr_space,
+                                             bool use_soft_gic = false);
 
     VCpuExitAction RunOnce() override;
     void CancelRun() override;
@@ -50,6 +53,12 @@ public:
     void SetPsciShutdownCallback(PsciShutdownCallback cb) { psci_shutdown_cb_ = std::move(cb); }
     void SetPsciRebootCallback(PsciRebootCallback cb) { psci_reboot_cb_ = std::move(cb); }
 
+    void SetSoftGic(gicv3::SoftGic* gic) { soft_gic_ = gic; }
+    hv_vcpu_t GetVCpuHandle() const { return vcpu_; }
+
+    void SetIrqPending(bool pending) { irq_pending_.store(pending, std::memory_order_release); }
+    bool IsIrqPending() const { return irq_pending_.load(std::memory_order_acquire); }
+
     static void EnableExitStats(bool on) { s_stats_enabled_.store(on, std::memory_order_relaxed); }
 
 private:
@@ -58,6 +67,7 @@ private:
     VCpuExitAction HandleException();
     VCpuExitAction HandleHvc();
     VCpuExitAction HandleDataAbort(uint64_t syndrome);
+    VCpuExitAction HandleSysReg(uint64_t syndrome);
     bool DoMmioRead(uint64_t gpa, uint8_t size, uint8_t reg);
     bool DoMmioWrite(uint64_t gpa, uint8_t size, uint64_t value);
 
@@ -106,6 +116,8 @@ private:
     PsciCpuOnCallback psci_cpu_on_cb_;
     PsciShutdownCallback psci_shutdown_cb_;
     PsciRebootCallback psci_reboot_cb_;
+    gicv3::SoftGic* soft_gic_ = nullptr;
+    std::atomic<bool> irq_pending_{false};
 };
 
 } // namespace hvf

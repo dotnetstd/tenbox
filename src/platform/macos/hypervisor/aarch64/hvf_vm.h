@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <memory>
 
+namespace gicv3 { class SoftGic; }
+
 namespace hvf {
 
 class HvfVm final : public HypervisorVm {
@@ -23,6 +25,9 @@ public:
     uint64_t GetRedistBase() const { return redist_base_; }
     size_t GetRedistSizePerCpu() const { return redist_size_per_cpu_; }
 
+    bool UsesSoftGic() const { return soft_gic_ != nullptr; }
+    gicv3::SoftGic* GetSoftGic() const { return soft_gic_.get(); }
+
 private:
     HvfVm() = default;
     uint32_t cpu_count_ = 0;
@@ -30,6 +35,7 @@ private:
     bool gic_created_ = false;
     uint64_t redist_base_ = 0;
     size_t redist_size_per_cpu_ = 0;
+    std::unique_ptr<gicv3::SoftGic> soft_gic_;
 };
 
 } // namespace hvf

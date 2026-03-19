@@ -50,6 +50,7 @@ private:
     // Mask to extract the host offset from L1/L2 entries (bits 9..55)
     static constexpr uint64_t kOffsetMask    = 0x00FFFFFFFFFFFE00ULL;
     static constexpr size_t   kL2CacheMax    = 64;
+    static constexpr size_t   kRfbCacheMax   = 64;
 
     static uint16_t Be16(uint16_t v);
     static uint32_t Be32(uint32_t v);
@@ -57,20 +58,28 @@ private:
 
     bool ReadHeader();
     bool ReadL1Table();
+    bool ReadRefcountTable();
 
     // L2 cache: returns pointer to cached L2 table entries (host byte order).
     // The returned pointer is valid until the next L2 lookup (LRU eviction).
     uint64_t* GetL2Table(uint64_t l2_offset);
     void EvictL2Cache();
 
+    // Refcount block cache
+    uint16_t* GetRefcountBlock(uint64_t cluster_index, uint32_t* rfb_index,
+                               bool allocate);
+    void EvictRfbCache();
+    void FlushRefcountTable();
+
     // Resolve a virtual offset to a host file offset. Returns 0 if unallocated.
     // Sets `compressed` and `comp_size` if the cluster is compressed.
     uint64_t ResolveOffset(uint64_t virt_offset, bool* compressed,
                            uint64_t* comp_host_off, uint32_t* comp_size);
 
-    // Allocate a new cluster at the end of the file.
+    // Allocate a cluster with refcount=1. Returns host file offset, or 0 on error.
     uint64_t AllocateCluster();
-    uint64_t AllocateClusters(uint32_t count);
+    // Decrement refcount of the cluster at the given host offset.
+    void FreeCluster(uint64_t host_offset);
 
     // Ensure L2 table is allocated for the given L1 index.
     uint64_t* EnsureL2Table(uint32_t l1_idx);
@@ -94,6 +103,23 @@ private:
     std::vector<uint64_t> l1_table_;  // in host byte order
     uint64_t file_end_ = 0;          // current end of file (for append allocations)
     uint8_t compression_type_ = 0;   // 0=zlib (deflate), 1=zstd
+
+    // Refcount management
+    std::vector<uint64_t> refcount_table_;  // host byte order
+    uint64_t refcount_table_offset_ = 0;
+    uint32_t refcount_table_clusters_ = 0;
+    uint32_t rfb_entries_ = 0;              // entries per refcount block
+    uint64_t free_cluster_index_ = 0;
+    bool refcount_table_dirty_ = false;
+
+    // Refcount block LRU cache
+    struct RfbCacheEntry {
+        uint64_t offset_in_file;
+        std::vector<uint16_t> data;   // host byte order
+        bool dirty;
+    };
+    std::list<RfbCacheEntry> rfb_lru_;
+    std::unordered_map<uint64_t, std::list<RfbCacheEntry>::iterator> rfb_map_;
 
     // L2 LRU cache
     struct L2CacheEntry {

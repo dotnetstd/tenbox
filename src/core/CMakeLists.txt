@@ -44,6 +44,7 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
         ${CMAKE_SOURCE_DIR}/src/core/arch/aarch64/pl011.cpp
         ${CMAKE_SOURCE_DIR}/src/core/arch/aarch64/aarch64_machine.cpp
         ${CMAKE_SOURCE_DIR}/src/core/device/rtc/pl031_rtc.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/device/irq/gicv3.cpp
     )
 endif()
 

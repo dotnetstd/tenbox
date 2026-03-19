@@ -1,5 +1,7 @@
 #include "platform/macos/hypervisor/aarch64/hvf_vcpu.h"
 #include "platform/macos/hypervisor/aarch64/hvf_mmio_decode.h"
+#include "core/device/irq/gicv3.h"
+#include "core/device/irq/gicv3_regs.h"
 #include "core/vmm/types.h"
 #include <chrono>
 #include <cstdio>
@@ -24,13 +26,13 @@ HvfVCpu::~HvfVCpu() {
     }
 }
 
-std::unique_ptr<HvfVCpu> HvfVCpu::Create(uint32_t index, AddressSpace* addr_space) {
+std::unique_ptr<HvfVCpu> HvfVCpu::Create(uint32_t index, AddressSpace* addr_space,
+                                           bool use_soft_gic) {
     auto vcpu = std::unique_ptr<HvfVCpu>(new HvfVCpu());
     vcpu->index_ = index;
     vcpu->addr_space_ = addr_space;
 
     hv_vcpu_config_t config = hv_vcpu_config_create();
-
     hv_return_t ret = hv_vcpu_create(&vcpu->vcpu_, &vcpu->vcpu_exit_, config);
     if (ret != HV_SUCCESS) {
         LOG_ERROR("hvf: hv_vcpu_create(%u) failed: %d", index, (int)ret);
@@ -43,18 +45,15 @@ std::unique_ptr<HvfVCpu> HvfVCpu::Create(uint32_t index, AddressSpace* addr_spac
 
     hv_vcpu_set_trap_debug_exceptions(vcpu->vcpu_, true);
 
-    uint32_t vtimer_intid = 0;
-    if (__builtin_available(macOS 15.0, *)) {
-        hv_return_t gic_ret = hv_gic_get_intid(HV_GIC_INT_EL1_VIRTUAL_TIMER, &vtimer_intid);
-        if (gic_ret == HV_SUCCESS) {
-            vcpu->vtimer_intid_ = vtimer_intid;
-        } else {
-            vcpu->vtimer_intid_ = 27;
-            LOG_WARN("hvf: vCPU %u failed to get vtimer INTID (ret=%d), using default 27",
-                     index, (int)gic_ret);
+    vcpu->vtimer_intid_ = 27;
+    if (!use_soft_gic) {
+        if (__builtin_available(macOS 15.0, *)) {
+            uint32_t vtimer_intid = 0;
+            hv_return_t gic_ret = hv_gic_get_intid(HV_GIC_INT_EL1_VIRTUAL_TIMER, &vtimer_intid);
+            if (gic_ret == HV_SUCCESS) {
+                vcpu->vtimer_intid_ = vtimer_intid;
+            }
         }
-    } else {
-        vcpu->vtimer_intid_ = 27;
     }
 
     LOG_INFO("hvf: vCPU %u created (vtimer INTID=%u)", index, vcpu->vtimer_intid_);
@@ -69,7 +68,15 @@ VCpuExitAction HvfVCpu::RunOnce() {
         if (!irq_asserted) {
             hv_vcpu_set_vtimer_mask(vcpu_, false);
             vtimer_masked_ = false;
+            if (soft_gic_) {
+                soft_gic_->SetPpiLevel(index_, vtimer_intid_, false);
+            }
         }
+    }
+
+    if (soft_gic_) {
+        bool pending = irq_pending_.load(std::memory_order_acquire);
+        hv_vcpu_set_pending_interrupt(vcpu_, HV_INTERRUPT_TYPE_IRQ, pending);
     }
 
     hv_return_t ret = hv_vcpu_run(vcpu_);
@@ -101,15 +108,15 @@ VCpuExitAction HvfVCpu::RunOnce() {
         s_stats_.vtimer_activated.fetch_add(1, std::memory_order_relaxed);
         vtimer_masked_ = true;
 
-        uint32_t ppi_bit = 1u << vtimer_intid_;
-        if (__builtin_available(macOS 15.0, *)) {
+        if (soft_gic_) {
+            soft_gic_->SetPpiLevel(index_, vtimer_intid_, true);
+        } else if (__builtin_available(macOS 15.0, *)) {
+            uint32_t ppi_bit = 1u << vtimer_intid_;
             hv_return_t gic_ret = hv_gic_set_redistributor_reg(vcpu_,
                 HV_GIC_REDISTRIBUTOR_REG_GICR_ISPENDR0, ppi_bit);
             if (gic_ret != HV_SUCCESS) {
                 hv_vcpu_set_pending_interrupt(vcpu_, HV_INTERRUPT_TYPE_IRQ, true);
             }
-        } else {
-            hv_vcpu_set_pending_interrupt(vcpu_, HV_INTERRUPT_TYPE_IRQ, true);
         }
 
         return VCpuExitAction::kContinue;
@@ -201,13 +208,8 @@ VCpuExitAction HvfVCpu::HandleException() {
         return HandleHvc();
 
     case kEcSysReg:
-        {
-            s_stats_.ec_sysreg.fetch_add(1, std::memory_order_relaxed);
-            uint64_t pc;
-            hv_vcpu_get_reg(vcpu_, HV_REG_PC, &pc);
-            hv_vcpu_set_reg(vcpu_, HV_REG_PC, pc + 4);
-        }
-        return VCpuExitAction::kContinue;
+        s_stats_.ec_sysreg.fetch_add(1, std::memory_order_relaxed);
+        return HandleSysReg(syndrome);
 
     case kEcBrk:
     {
@@ -301,6 +303,37 @@ VCpuExitAction HvfVCpu::HandleHvc() {
         hv_vcpu_set_reg(vcpu_, HV_REG_X0, static_cast<uint64_t>(-1LL));
         return VCpuExitAction::kContinue;
     }
+}
+
+VCpuExitAction HvfVCpu::HandleSysReg(uint64_t syndrome) {
+    uint64_t pc;
+    hv_vcpu_get_reg(vcpu_, HV_REG_PC, &pc);
+
+    if (soft_gic_) {
+        // ESR_EL2 ISS for EC=0x18 (MSR/MRS):
+        //   bit 0:  direction (0=write/MSR, 1=read/MRS)
+        //   bits [9:5]: Rt
+        uint32_t iss = static_cast<uint32_t>(syndrome & 0x1FFFFFF);
+        bool is_read = (iss & 1) != 0;
+        uint8_t rt = (iss >> 5) & 0x1F;
+
+        uint64_t reg_value = 0;
+        if (!is_read && rt < 31) {
+            hv_vcpu_get_reg(vcpu_, static_cast<hv_reg_t>(HV_REG_X0 + rt), &reg_value);
+        }
+
+        if (soft_gic_->HandleIccSysReg(index_, iss, &reg_value)) {
+            if (is_read && rt < 31) {
+                hv_vcpu_set_reg(vcpu_, static_cast<hv_reg_t>(HV_REG_X0 + rt), reg_value);
+            }
+            hv_vcpu_set_reg(vcpu_, HV_REG_PC, pc + 4);
+            return VCpuExitAction::kContinue;
+        }
+    }
+
+    // Unhandled system register — skip instruction
+    hv_vcpu_set_reg(vcpu_, HV_REG_PC, pc + 4);
+    return VCpuExitAction::kContinue;
 }
 
 VCpuExitAction HvfVCpu::HandleDataAbort(uint64_t syndrome) {
