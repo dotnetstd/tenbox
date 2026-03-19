@@ -70,6 +70,7 @@ private:
                                bool allocate);
     void EvictRfbCache();
     void FlushRefcountTable();
+    bool GrowRefcountTable(uint64_t min_cluster_index);
 
     // Resolve a virtual offset to a host file offset. Returns 0 if unallocated.
     // Sets `compressed` and `comp_size` if the cluster is compressed.
