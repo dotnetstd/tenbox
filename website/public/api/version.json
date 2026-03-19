@@ -16,12 +16,12 @@
       "min_os": "Windows 10"
     },
     "macos": {
-      "latest_version": "0.5.4",
+      "latest_version": "0.5.5",
       "release_notes": "修复磁盘损坏的问题\n兼容macOS 12~14版本",
       "release_date": "2026-03-19",
-      "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox-0.5.4.dmg",
-      "sha256": "4ae714ceebc87c028f1e1bf47f41e1a1e6f433803b40991ee94da826b29abd5d",
-      "size": 4539480,
+      "download_url": "https://files.xiaozhi.me/tenbox/releases/TenBox-0.5.5.dmg",
+      "sha256": "9348ca080bca2dc3adb742884ed66dd5e525857424a898525c350aad4d0a767f",
+      "size": 4547002,
       "min_os": "macOS 12"
     }
   }

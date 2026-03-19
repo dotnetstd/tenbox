@@ -25,7 +25,7 @@
       />
     </item>
     <item>
-      <title>Version 0.5.4</title>
+      <title>Version 0.5.5</title>
       <description><![CDATA[
         <ul>
           <li>修复磁盘损坏的问题</li>
@@ -35,12 +35,12 @@
       <pubDate>Thu, 19 Mar 2026 00:00:00 -0000</pubDate>
       <sparkle:minimumSystemVersion>12</sparkle:minimumSystemVersion>
       <enclosure
-        url="https://files.xiaozhi.me/tenbox/releases/TenBox-0.5.4.zip"
+        url="https://files.xiaozhi.me/tenbox/releases/TenBox-0.5.5.zip"
         sparkle:os="macos"
-        sparkle:version="0.5.4"
-        sparkle:shortVersionString="0.5.4"
-        sparkle:edSignature="o1yQzCpRDQDGlxWlX/+dbVRn9cK4ebPwL16VgbNBp+7SwmFXlYQBXLwmPrn8z40bLwrP3+EccEbAUZk3qpWPDg=="
-        length="4590292"
+        sparkle:version="0.5.5"
+        sparkle:shortVersionString="0.5.5"
+        sparkle:edSignature="+G7tYRLK18NbCgIdXGvBlFE22Y5HcOGnj9F3geabhjYGxSOpEsTS1z666HRwA6bb0041yZ8+Ylw8gewEI21mCA=="
+        length="4591734"
         type="application/octet-stream"
       />
     </item>
