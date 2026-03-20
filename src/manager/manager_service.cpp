@@ -712,6 +712,27 @@ void ManagerService::ShutdownAll() {
     }
 }
 
+void ManagerService::SyncGuestTimeForRunningVms() {
+    std::lock_guard<std::mutex> lock(vms_mutex_);
+    for (const auto& id : vm_order_) {
+        auto it = vms_.find(id);
+        if (it == vms_.end()) continue;
+        VmRecord& vm = it->second;
+        if (vm.state != VmPowerState::kRunning) continue;
+        if (!vm.guest_agent_connected) continue;
+        if (!vm.runtime.pipe_connected) continue;
+
+        ipc::Message msg;
+        msg.channel = ipc::Channel::kControl;
+        msg.kind = ipc::Kind::kRequest;
+        msg.type = "runtime.command";
+        msg.vm_id = id;
+        msg.request_id = GetTickCount64();
+        msg.fields["command"] = "sync-time";
+        SendRuntimeMessage(vm, msg);
+    }
+}
+
 // ── Queries ──────────────────────────────────────────────────────────
 
 std::vector<VmRecord> ManagerService::ListVms() const {

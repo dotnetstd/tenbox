@@ -217,3 +217,11 @@ void GuestAgentHandler::Shutdown(const std::string& mode) {
 void GuestAgentHandler::Ping() {
     SendCommand("guest-ping");
 }
+
+void GuestAgentHandler::SyncTime() {
+    auto now = std::chrono::system_clock::now();
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        now.time_since_epoch()).count();
+    std::string args = "{\"time\":" + std::to_string(ns) + "}";
+    SendCommand("guest-set-time", args);
+}

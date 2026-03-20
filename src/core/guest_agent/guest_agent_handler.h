@@ -34,6 +34,9 @@ public:
     // Send a guest-ping command; returns true if the request was sent
     void Ping();
 
+    // Sync guest wall clock to host (QGA guest-set-time, nanoseconds since epoch)
+    void SyncTime();
+
 private:
     void SendCommand(const std::string& command);
     void SendCommand(const std::string& command,

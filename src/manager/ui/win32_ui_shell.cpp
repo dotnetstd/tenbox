@@ -1279,6 +1279,14 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case WM_POWERBROADCAST:
+        // Host resumed from sleep: push wall time to guests via qemu-ga.
+        if (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND) {
+            shell->manager_.SyncGuestTimeForRunningVms();
+            return TRUE;
+        }
+        break;
+
     case WM_ACTIVATEAPP:
         if (!wp && p && p->display_panel) {
             p->display_panel->ReleaseAllModifiers();

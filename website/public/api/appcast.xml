@@ -25,22 +25,21 @@
       />
     </item>
     <item>
-      <title>Version 0.5.5</title>
+      <title>Version 0.5.6</title>
       <description><![CDATA[
         <ul>
-          <li>修复磁盘损坏的问题</li>
-          <li>兼容macOS 12~14版本</li>
+          <li>激活窗体时自动同步时间</li>
         </ul>
       ]]></description>
-      <pubDate>Thu, 19 Mar 2026 00:00:00 -0000</pubDate>
+      <pubDate>Fri, 20 Mar 2026 00:00:00 -0000</pubDate>
       <sparkle:minimumSystemVersion>12</sparkle:minimumSystemVersion>
       <enclosure
-        url="https://files.xiaozhi.me/tenbox/releases/TenBox-0.5.5.zip"
+        url="https://files.xiaozhi.me/tenbox/releases/TenBox-0.5.6.zip"
         sparkle:os="macos"
-        sparkle:version="0.5.5"
-        sparkle:shortVersionString="0.5.5"
-        sparkle:edSignature="+G7tYRLK18NbCgIdXGvBlFE22Y5HcOGnj9F3geabhjYGxSOpEsTS1z666HRwA6bb0041yZ8+Ylw8gewEI21mCA=="
-        length="4591734"
+        sparkle:version="0.5.6"
+        sparkle:shortVersionString="0.5.6"
+        sparkle:edSignature="dE5jUEFPmuOAlzAOSXR12235Gj0rB0TYS03K12Rb2l+WmZCNBQg81UNG5vQpyewmRZPCPDma7bT9wP/h/l1LBw=="
+        length="4594391"
         type="application/octet-stream"
       />
     </item>

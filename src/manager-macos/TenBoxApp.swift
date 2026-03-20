@@ -141,6 +141,7 @@ class AppState: ObservableObject {
     private var activeSessions: [String: VmSession] = [:]
     private var sessionCancellables: [String: AnyCancellable] = [:]
     private var stateObserver: NSObjectProtocol?
+    private var workspaceWakeObserver: NSObjectProtocol?
     private var pendingVmStartId: String?
     private var sleepAssertionID: IOPMAssertionID = IOPMAssertionID(0)
 
@@ -167,6 +168,24 @@ class AppState: ObservableObject {
                 }
             }
         }
+        workspaceWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.syncGuestTimeAfterHostWake()
+        }
+    }
+
+    /// After host sleep/resume, push wall time to guests via qemu-ga (runtime sync-time).
+    private func syncGuestTimeAfterHostWake() {
+        for (vmId, session) in activeSessions {
+            guard session.connected, session.ipcClient.isConnected else { continue }
+            guard session.guestAgentConnected else { continue }
+            guard let vm = vms.first(where: { $0.id == vmId }),
+                  vm.state == .running else { continue }
+            session.ipcClient.sendSyncTime()
+        }
     }
 
     private func setupClipboard() {
@@ -188,6 +207,9 @@ class AppState: ObservableObject {
         releaseSleepAssertion()
         if let obs = stateObserver {
             NotificationCenter.default.removeObserver(obs)
+        }
+        if let obs = workspaceWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(obs)
         }
     }
 

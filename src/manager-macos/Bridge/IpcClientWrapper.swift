@@ -69,6 +69,10 @@ class IpcClientWrapper: ObservableObject {
         client.sendControlCommand(command)
     }
 
+    func sendSyncTime() {
+        _ = client.sendSyncTimeCommand()
+    }
+
     func sendKey(code: UInt16, pressed: Bool) {
         client.sendKeyEvent(code, pressed: pressed)
     }

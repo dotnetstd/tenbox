@@ -88,6 +88,7 @@ public:
     GuestAgentHandler* GetGuestAgentHandler() { return guest_agent_handler_.get(); }
     bool IsGuestAgentConnected() const;
     void GuestAgentShutdown(const std::string& mode = "powerdown");
+    void GuestAgentSyncTime();
 
 private:
     Vm() = default;

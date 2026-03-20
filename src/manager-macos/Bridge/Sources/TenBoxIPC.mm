@@ -140,6 +140,10 @@ static std::string HexDecode(const std::string& hex) {
     return _connection->Send(encoded);
 }
 
+- (BOOL)sendSyncTimeCommand {
+    return [self sendControlCommand:@"sync-time"];
+}
+
 #pragma mark - Send: Input
 
 - (BOOL)sendKeyEvent:(uint16_t)code pressed:(BOOL)pressed {

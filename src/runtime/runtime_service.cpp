@@ -514,6 +514,9 @@ void RuntimeControlService::AttachVm(Vm* vm) {
 
     if (vm_ && vm_->GetGuestAgentHandler()) {
         vm_->GetGuestAgentHandler()->SetConnectedCallback([this](bool connected) {
+            if (connected && vm_) {
+                vm_->GuestAgentSyncTime();
+            }
             ipc::Message event;
             event.kind = ipc::Kind::kEvent;
             event.channel = ipc::Channel::kControl;
@@ -617,6 +620,12 @@ void RuntimeControlService::HandleMessage(const ipc::Message& message) {
             }
         } else if (cmd == "start") {
             resp.fields["note"] = "runtime already started by process launch";
+        } else if (cmd == "sync-time") {
+            if (vm_ && vm_->IsGuestAgentConnected()) {
+                vm_->GuestAgentSyncTime();
+            } else if (vm_) {
+                resp.fields["note"] = "guest agent not connected";
+            }
         } else {
             resp.fields["ok"] = "false";
             resp.fields["error"] = "unknown command";

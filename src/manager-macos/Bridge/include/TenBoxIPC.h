@@ -15,8 +15,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) uint64_t generation;
 - (BOOL)isConnected;
 
-// Control commands: "stop", "shutdown", "reboot"
+// Control commands: "stop", "shutdown", "reboot", "sync-time"
 - (BOOL)sendControlCommand:(NSString *)command;
+
+/// Push host wall time to guest (qemu-ga guest-set-time) when guest agent is connected.
+- (BOOL)sendSyncTimeCommand;
 
 // Input events (forwarded to virtio-input)
 - (BOOL)sendKeyEvent:(uint16_t)code pressed:(BOOL)pressed;

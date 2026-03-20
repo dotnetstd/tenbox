@@ -756,3 +756,9 @@ void Vm::GuestAgentShutdown(const std::string& mode) {
         guest_agent_handler_->Shutdown(mode);
     }
 }
+
+void Vm::GuestAgentSyncTime() {
+    if (guest_agent_handler_) {
+        guest_agent_handler_->SyncTime();
+    }
+}

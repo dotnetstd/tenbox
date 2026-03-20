@@ -129,6 +129,9 @@ public:
     bool ShutdownVm(const std::string& vm_id, std::string* error);
     void ShutdownAll();
 
+    // Push host wall time to all running VMs with guest agent (after host resume).
+    void SyncGuestTimeForRunningVms();
+
     std::vector<VmRecord> ListVms() const;
     std::optional<VmRecord> GetVm(const std::string& vm_id) const;
     void ReorderVm(int from, int to);
