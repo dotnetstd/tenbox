@@ -27,7 +27,7 @@
           "name": "rootfs.qcow2",
           "url": "https://files.xiaozhi.me/tenbox/images/openclaw/rootfs-openclaw-2026.3.13-x86_64.qcow2",
           "sha256": "",
-          "size": 1694510080
+          "size": 1639242240
         }
       ]
     },
@@ -182,7 +182,7 @@
           "name": "rootfs.qcow2",
           "url": "https://files.xiaozhi.me/tenbox/images/openclaw-arm64/rootfs-openclaw-2026.3.13-arm64.qcow2",
           "sha256": "",
-          "size": 1683200000
+          "size": 1643642880
         }
       ]
     }
