@@ -48,6 +48,7 @@ uint64_t Qcow2DiskImage::Be64(uint64_t v) {
 Qcow2DiskImage::~Qcow2DiskImage() {
     if (file_) {
         Flush();
+        ClearDirtyBit();
         fclose(file_);
         file_ = nullptr;
     }
@@ -94,6 +95,7 @@ bool Qcow2DiskImage::Open(const std::string& path) {
              compression_type_ == 1 ? "zstd" : "zlib");
     
     RepairLeaks(true);
+    SetDirtyBit();
 
     return true;
 }
@@ -144,15 +146,49 @@ bool Qcow2DiskImage::ReadHeader() {
     refcount_table_offset_ = Be64(hdr.refcount_table_offset);
     refcount_table_clusters_ = Be32(hdr.refcount_table_clusters);
 
-    // Read refcount_order: v2 always uses order=4 (16-bit), v3 reads from header
+    // v3 feature bits & extended fields
     refcount_order_ = 4;
+    compression_type_ = 0;
     if (version_ == 3) {
+        // Per spec: "An implementation must fail to open an image if an
+        // unknown incompatible feature bit is set."
+        // We support: bit 0 (dirty) and bit 3 (compression type).
+        constexpr uint64_t kSupportedIncompat =
+            (1ULL << 0) |   // dirty
+            (1ULL << 3);    // compression type
+        uint64_t incompat = Be64(hdr.incompatible_features);
+        if (incompat & ~kSupportedIncompat) {
+            LOG_ERROR("Qcow2: unsupported incompatible features 0x%llX "
+                      "(supported mask 0x%llX)",
+                      (unsigned long long)incompat,
+                      (unsigned long long)kSupportedIncompat);
+            return false;
+        }
+        if (incompat & (1ULL << 0)) {
+            LOG_INFO("Qcow2: dirty bit set — will repair refcounts on open");
+        }
+
         refcount_order_ = Be32(hdr.refcount_order);
         if (refcount_order_ > 6) {
             LOG_ERROR("Qcow2: invalid refcount_order %u (max 6)", refcount_order_);
             return false;
         }
+
+        uint32_t header_length = Be32(hdr.header_length);
+        if (header_length > offsetof(Qcow2Header, refcount_order) + 8) {
+            uint8_t comp_type = 0;
+            _fseeki64(file_, 104, SEEK_SET);
+            if (fread(&comp_type, 1, 1, file_) == 1) {
+                compression_type_ = comp_type;
+                if (compression_type_ > 1) {
+                    LOG_ERROR("Qcow2: unsupported compression_type %u",
+                              compression_type_);
+                    return false;
+                }
+            }
+        }
     }
+
     refcount_bits_ = 1u << refcount_order_;
     if (refcount_bits_ != 16) {
         LOG_ERROR("Qcow2: unsupported refcount_bits %u (only 16-bit supported)",
@@ -161,24 +197,29 @@ bool Qcow2DiskImage::ReadHeader() {
     }
     rfb_entries_ = cluster_size_ * 8 / refcount_bits_;
 
-    // Read compression_type for qcow2 v3 (offset 104, requires header_length >= 108)
-    compression_type_ = 0;  // default: zlib (DEFLATE)
-    if (version_ == 3) {
-        uint32_t header_length = Be32(hdr.header_length);
-        if (header_length >= 108) {
-            uint8_t comp_type = 0;
-            _fseeki64(file_, 104, SEEK_SET);
-            if (fread(&comp_type, 1, 1, file_) == 1) {
-                compression_type_ = comp_type;
-                if (compression_type_ > 1) {
-                    LOG_ERROR("Qcow2: unsupported compression_type %u", compression_type_);
-                    return false;
-                }
-            }
-        }
-    }
-
     return true;
+}
+
+void Qcow2DiskImage::SetDirtyBit() {
+    if (version_ < 3) return;
+    uint64_t incompat;
+    _fseeki64(file_, offsetof(Qcow2Header, incompatible_features), SEEK_SET);
+    if (fread(&incompat, sizeof(incompat), 1, file_) != 1) return;
+    incompat = Be64(Be64(incompat) | (1ULL << 0));
+    _fseeki64(file_, offsetof(Qcow2Header, incompatible_features), SEEK_SET);
+    fwrite(&incompat, sizeof(incompat), 1, file_);
+    fflush(file_);
+}
+
+void Qcow2DiskImage::ClearDirtyBit() {
+    if (version_ < 3) return;
+    uint64_t incompat;
+    _fseeki64(file_, offsetof(Qcow2Header, incompatible_features), SEEK_SET);
+    if (fread(&incompat, sizeof(incompat), 1, file_) != 1) return;
+    incompat = Be64(Be64(incompat) & ~(1ULL << 0));
+    _fseeki64(file_, offsetof(Qcow2Header, incompatible_features), SEEK_SET);
+    fwrite(&incompat, sizeof(incompat), 1, file_);
+    fflush(file_);
 }
 
 bool Qcow2DiskImage::ReadL1Table() {
@@ -211,7 +252,11 @@ bool Qcow2DiskImage::ReadRefcountTable() {
     }
 
     for (size_t i = 0; i < table_entries; i++) {
-        refcount_table_[i] = Be64(refcount_table_[i]);
+        uint64_t raw = Be64(refcount_table_[i]);
+        uint64_t masked = raw & kReftOffsetMask;
+        if (masked != raw)
+            refcount_table_dirty_ = true;
+        refcount_table_[i] = masked;
     }
     return true;
 }
@@ -395,29 +440,48 @@ void Qcow2DiskImage::FlushRefcountTable() {
 }
 
 bool Qcow2DiskImage::GrowRefcountTable(uint64_t min_cluster_index) {
-    // Flush everything first so disk state is consistent
     Flush();
 
     uint64_t needed_rft_index = min_cluster_index / rfb_entries_;
-    // Grow to at least 150% of the needed size for headroom
-    size_t new_entries = static_cast<size_t>((needed_rft_index + 1) * 3 / 2);
-    size_t new_byte_size = new_entries * sizeof(uint64_t);
-    uint32_t new_clusters =
-        static_cast<uint32_t>((new_byte_size + cluster_size_ - 1) / cluster_size_);
-    new_entries = static_cast<size_t>(new_clusters) * cluster_size_ / sizeof(uint64_t);
-    new_byte_size = new_entries * sizeof(uint64_t);
 
-    // Allocate the new table at file_end_
+    // The new table is placed at file_end_.  We must size it large enough
+    // to cover both the requested cluster AND the table's own clusters, plus
+    // one refcount block per table entry range that doesn't have one yet.
+    // Iterate until the table is self-covering.
     uint64_t new_table_offset = file_end_;
+    size_t new_entries;
+    size_t new_byte_size;
+    uint32_t new_clusters;
+
+    size_t min_entries = static_cast<size_t>(needed_rft_index + 1);
+    for (;;) {
+        new_entries = min_entries * 3 / 2;  // 150% headroom
+        new_byte_size = new_entries * sizeof(uint64_t);
+        new_clusters =
+            static_cast<uint32_t>((new_byte_size + cluster_size_ - 1) / cluster_size_);
+        new_entries = static_cast<size_t>(new_clusters) * cluster_size_ / sizeof(uint64_t);
+        new_byte_size = new_entries * sizeof(uint64_t);
+
+        // Check: can this table cover its own last cluster?
+        uint64_t table_last_ci =
+            (new_table_offset + new_byte_size - 1) >> cluster_bits_;
+        uint64_t needed_rft = table_last_ci / rfb_entries_ + 1;
+        if (needed_rft <= new_entries) break;
+        min_entries = static_cast<size_t>(needed_rft);
+    }
+
     file_end_ = new_table_offset + new_byte_size;
 
-    // Build the new table: copy old entries, zero-fill the rest
+    uint64_t old_table_offset = refcount_table_offset_;
+    uint32_t old_table_clusters = refcount_table_clusters_;
+
+    // Build the new table: copy old entries, zero-fill the rest.
     std::vector<uint64_t> new_table(new_entries, 0);
     for (size_t i = 0; i < refcount_table_.size() && i < new_entries; i++) {
         new_table[i] = refcount_table_[i];
     }
 
-    // Write new table to disk (big-endian)
+    // Write new table to disk (big-endian).
     std::vector<uint64_t> be_table(new_entries);
     for (size_t i = 0; i < new_entries; i++) {
         be_table[i] = Be64(new_table[i]);
@@ -428,31 +492,101 @@ bool Qcow2DiskImage::GrowRefcountTable(uint64_t min_cluster_index) {
         return false;
     }
 
-    // Update header fields (refcount_table_offset and refcount_table_clusters)
+    // Update header: refcount_table_offset (offset 48) and
+    // refcount_table_clusters (offset 56).
     uint64_t be_offset = Be64(new_table_offset);
     _fseeki64(file_, 48, SEEK_SET);
     if (fwrite(&be_offset, sizeof(be_offset), 1, file_) != 1) {
         LOG_ERROR("Qcow2: failed to update refcount_table_offset in header");
         return false;
     }
-    uint32_t be_clusters = Be32(new_clusters);
+    uint32_t be_nclusters = Be32(new_clusters);
     _fseeki64(file_, 56, SEEK_SET);
-    if (fwrite(&be_clusters, sizeof(be_clusters), 1, file_) != 1) {
+    if (fwrite(&be_nclusters, sizeof(be_nclusters), 1, file_) != 1) {
         LOG_ERROR("Qcow2: failed to update refcount_table_clusters in header");
         return false;
     }
     fflush(file_);
 
-    // Update in-memory state
+    // Switch in-memory state.
     refcount_table_ = std::move(new_table);
     refcount_table_offset_ = new_table_offset;
     refcount_table_clusters_ = new_clusters;
     refcount_table_dirty_ = false;
 
-    // The new table clusters themselves need refcounting.  Since we just grew
-    // the table, the refcount blocks for these clusters may not exist yet.
-    // We rely on GetRefcountBlock(allocate=true) to handle that on demand,
-    // so we don't recurse here — the caller will retry.
+    // Invalidate in-memory refcount block cache: we're about to manipulate
+    // refcount blocks directly on disk for the new table's own clusters.
+    // This avoids stale cache entries conflicting with our direct writes.
+    for (auto& entry : rfb_lru_) {
+        if (entry.dirty) {
+            std::vector<uint16_t> be_data(rfb_entries_);
+            for (uint32_t i = 0; i < rfb_entries_; i++)
+                be_data[i] = Be16(entry.data[i]);
+            size_t bytes = rfb_entries_ * sizeof(uint16_t);
+            _fseeki64(file_, entry.offset_in_file, SEEK_SET);
+            fwrite(be_data.data(), 1, bytes, file_);
+        }
+    }
+    rfb_lru_.clear();
+    rfb_map_.clear();
+
+    // Set refcount=1 for each cluster occupied by the new table.
+    // We write directly to refcount blocks on disk to avoid recursive
+    // GetRefcountBlock → GrowRefcountTable calls.
+    //
+    // Phase A: set refcount=1 for each table cluster, creating new
+    // refcount blocks as needed and tracking them.
+    std::vector<uint64_t> new_block_offsets;
+
+    auto ensure_block = [&](uint64_t rft_i) -> uint64_t {
+        uint64_t block_off = refcount_table_[rft_i];
+        if (block_off != 0) return block_off;
+
+        block_off = file_end_;
+        file_end_ += cluster_size_;
+
+        std::vector<uint8_t> zeros(cluster_size_, 0);
+        _fseeki64(file_, block_off, SEEK_SET);
+        fwrite(zeros.data(), 1, cluster_size_, file_);
+
+        refcount_table_[rft_i] = block_off;
+        refcount_table_dirty_ = true;
+        new_block_offsets.push_back(block_off);
+        return block_off;
+    };
+
+    auto set_refcount_1 = [&](uint64_t ci) {
+        uint64_t rft_i = ci / rfb_entries_;
+        uint32_t rfb_i = static_cast<uint32_t>(ci % rfb_entries_);
+        uint64_t block_off = ensure_block(rft_i);
+        uint16_t one = Be16(1);
+        _fseeki64(file_, block_off + rfb_i * sizeof(uint16_t), SEEK_SET);
+        fwrite(&one, sizeof(one), 1, file_);
+    };
+
+    for (uint32_t i = 0; i < new_clusters; i++) {
+        set_refcount_1((new_table_offset >> cluster_bits_) + i);
+    }
+
+    // Phase B: set refcount=1 for every newly created refcount block.
+    // This may cascade (a block's cluster may need yet another block),
+    // so we iterate until all are handled.
+    for (size_t bi = 0; bi < new_block_offsets.size(); bi++) {
+        set_refcount_1(new_block_offsets[bi] >> cluster_bits_);
+    }
+
+    // Flush updated refcount table to disk.
+    if (refcount_table_dirty_) {
+        FlushRefcountTable();
+    }
+    fflush(file_);
+
+    // Free the old refcount table clusters.
+    // Use GetRefcountBlock normally now (cache was invalidated, state is
+    // consistent after our direct writes).
+    for (uint32_t i = 0; i < old_table_clusters; i++) {
+        FreeCluster(old_table_offset + static_cast<uint64_t>(i) * cluster_size_);
+    }
 
     LOG_INFO("Qcow2: grew refcount table to %u clusters (%zu entries) at 0x%llX",
              new_clusters, new_entries, new_table_offset);
@@ -599,8 +733,56 @@ bool Qcow2DiskImage::ReadCompressedCluster(uint64_t comp_host_off,
 
 bool Qcow2DiskImage::WriteCluster(uint64_t host_off, uint64_t in_cluster_off,
                                     const void* buf, uint32_t len) {
+    if (!CheckMetadataOverlap(host_off, cluster_size_)) {
+        return false;
+    }
     _fseeki64(file_, host_off + in_cluster_off, SEEK_SET);
     return fwrite(buf, 1, len, file_) == len;
+}
+
+bool Qcow2DiskImage::CheckMetadataOverlap(uint64_t offset, uint64_t size) {
+    uint64_t end = offset + size;
+
+    // Header cluster (cluster 0)
+    if (offset < cluster_size_) {
+        LOG_ERROR("Qcow2: overlap with header at offset 0x%llX",
+                  (unsigned long long)offset);
+        return false;
+    }
+
+    // Active L1 table
+    uint64_t l1_end = l1_table_offset_ +
+        static_cast<uint64_t>(l1_size_) * sizeof(uint64_t);
+    if (offset < l1_end && end > l1_table_offset_) {
+        LOG_ERROR("Qcow2: overlap with L1 table at offset 0x%llX",
+                  (unsigned long long)offset);
+        return false;
+    }
+
+    // Refcount table
+    uint64_t rft_end = refcount_table_offset_ +
+        static_cast<uint64_t>(refcount_table_clusters_) * cluster_size_;
+    if (offset < rft_end && end > refcount_table_offset_) {
+        LOG_ERROR("Qcow2: overlap with refcount table at offset 0x%llX",
+                  (unsigned long long)offset);
+        return false;
+    }
+
+    // Refcount block that covers THIS cluster (O(1) check instead of
+    // scanning all blocks — sufficient since AllocateCluster guarantees
+    // the cluster's refcount was 0 before allocation).
+    uint64_t ci = offset >> cluster_bits_;
+    uint64_t rft_i = ci / rfb_entries_;
+    if (rft_i < refcount_table_.size()) {
+        uint64_t blk = refcount_table_[rft_i];
+        if (blk != 0 && offset < blk + cluster_size_ && end > blk) {
+            LOG_ERROR("Qcow2: overlap with refcount block at offset 0x%llX",
+                      (unsigned long long)offset);
+            return false;
+        }
+    }
+
+    return true;
 }
 
 // ---------- allocation ----------
@@ -614,8 +796,13 @@ uint64_t Qcow2DiskImage::AllocateCluster() {
         if (rfb[rfb_index] == 0) {
             break;
         }
+        uint64_t prev = cluster_index;
         cluster_index = free_cluster_index_++;
-        if (++rfb_index >= rfb_entries_) {
+        // Reload the refcount block whenever cluster_index didn't
+        // advance by exactly 1 (free_cluster_index_ may have been
+        // reset by FreeCluster inside GrowRefcountTable) or when
+        // crossing a block boundary.
+        if (cluster_index != prev + 1 || ++rfb_index >= rfb_entries_) {
             rfb = GetRefcountBlock(cluster_index, &rfb_index, true);
         }
     }
@@ -821,6 +1008,7 @@ bool Qcow2DiskImage::Write(uint64_t offset, const void* buf, uint32_t len) {
                 return false;
             }
 
+            // COW: read old cluster data before we touch the L2 entry.
             if (chunk < cluster_size_ && l2_entry != 0) {
                 std::vector<uint8_t> old_data(cluster_size_, 0);
                 bool comp = false;
@@ -840,8 +1028,21 @@ bool Qcow2DiskImage::Write(uint64_t offset, const void* buf, uint32_t len) {
                 WriteCluster(data_off, 0, old_data.data(), cluster_size_);
             }
 
-            // Free old cluster(s) after COW read is done but before L2 update.
-            // Matches QEMU handle_alloc: free old entries with DISCARD_NEVER.
+            // Match QEMU handle_alloc order:
+            //   1. Update L2 entry to point to the new cluster FIRST.
+            //   2. Then free the old cluster(s).
+            // If we crash between 1 and 2, the old cluster is leaked (harmless).
+            // The reverse order (free then update L2) would leave L2 pointing
+            // to a freed cluster on crash — potential data corruption.
+            l2[l2_idx] = data_off | kCopiedBit;
+
+            uint64_t l2_table_off = l1_table_[l1_idx] & kOffsetMask;
+            auto it = l2_map_.find(l2_table_off);
+            if (it != l2_map_.end()) {
+                it->second->dirty = true;
+            }
+
+            // Now safe to free old cluster(s).
             if (l2_entry != 0) {
                 if (l2_entry & kCompressedBit) {
                     FreeCompressedCluster(l2_entry);
@@ -851,14 +1052,6 @@ bool Qcow2DiskImage::Write(uint64_t offset, const void* buf, uint32_t len) {
                         FreeCluster(old_off);
                     }
                 }
-            }
-
-            l2[l2_idx] = data_off | kCopiedBit;
-
-            uint64_t l2_table_off = l1_table_[l1_idx] & kOffsetMask;
-            auto it = l2_map_.find(l2_table_off);
-            if (it != l2_map_.end()) {
-                it->second->dirty = true;
             }
         } else {
             data_off = l2_entry & kOffsetMask;
@@ -895,6 +1088,14 @@ bool Qcow2DiskImage::Discard(uint64_t offset, uint64_t len) {
                     uint64_t* l2 = GetL2Table(l2_table_off);
                     if (l2 && l2[l2_idx] != 0) {
                         uint64_t l2_entry = l2[l2_idx];
+
+                        // Update L2 first (crash-safe: leaked > corrupted).
+                        l2[l2_idx] = 0;
+                        auto it = l2_map_.find(l2_table_off);
+                        if (it != l2_map_.end())
+                            it->second->dirty = true;
+
+                        // Then free old cluster(s).
                         if (l2_entry & kCompressedBit) {
                             FreeCompressedCluster(l2_entry);
                         } else {
@@ -903,10 +1104,6 @@ bool Qcow2DiskImage::Discard(uint64_t offset, uint64_t len) {
                                 FreeCluster(host_off);
                             }
                         }
-                        l2[l2_idx] = 0;
-                        auto it = l2_map_.find(l2_table_off);
-                        if (it != l2_map_.end())
-                            it->second->dirty = true;
                     }
                 }
             }

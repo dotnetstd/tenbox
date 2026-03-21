@@ -56,6 +56,8 @@ private:
     static constexpr uint64_t kOffsetMask    = 0x00FFFFFFFFFFFE00ULL;
     // Bit 0 of standard cluster descriptor: cluster reads as all zeros (v3)
     static constexpr uint64_t kZeroFlag      = 1ULL;
+    // Mask for refcount table entries (bits 9-63, per spec bits 0-8 reserved)
+    static constexpr uint64_t kReftOffsetMask = 0xFFFFFFFFFFFFFE00ULL;
     static constexpr size_t   kL2CacheMax    = 64;
     static constexpr size_t   kRfbCacheMax   = 64;
 
@@ -66,6 +68,8 @@ private:
     bool ReadHeader();
     bool ReadL1Table();
     bool ReadRefcountTable();
+    void SetDirtyBit();
+    void ClearDirtyBit();
 
     // L2 cache: returns pointer to cached L2 table entries (host byte order).
     // The returned pointer is valid until the next L2 lookup (LRU eviction).
@@ -100,6 +104,7 @@ private:
                                uint64_t in_cluster_off, void* buf, uint32_t len);
     bool WriteCluster(uint64_t host_off, uint64_t in_cluster_off,
                       const void* buf, uint32_t len);
+    bool CheckMetadataOverlap(uint64_t offset, uint64_t size);
 
     FILE* file_ = nullptr;
     uint64_t virtual_size_ = 0;
