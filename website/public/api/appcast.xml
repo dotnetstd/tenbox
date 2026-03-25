@@ -26,23 +26,22 @@
       />
     </item>
     <item>
-      <title>Version 0.5.8</title>
+      <title>Version 0.5.9</title>
       <description><![CDATA[
         <ul>
-          <li>- 增加 VM 菜单</li>
-          <li>- 增加克隆功能</li>
-          <li>- 0.5.7之前版本，请在升级前确保已备份虚拟机内的重要数据</li>
+          <li>- 支持 Debian 13 镜像</li>
+          <li>- 重要‼️ 0.5.7 之前版本，请在升级前确保已备份虚拟机内的重要数据</li>
         </ul>
       ]]></description>
-      <pubDate>Tue, 24 Mar 2026 00:00:00 -0000</pubDate>
+      <pubDate>Thu, 26 Mar 2026 00:00:00 -0000</pubDate>
       <sparkle:minimumSystemVersion>12</sparkle:minimumSystemVersion>
       <enclosure
-        url="https://files.xiaozhi.me/tenbox/releases/TenBox-0.5.8.zip"
+        url="https://files.xiaozhi.me/tenbox/releases/TenBox-0.5.9.zip"
         sparkle:os="macos"
-        sparkle:version="0.5.8"
-        sparkle:shortVersionString="0.5.8"
-        sparkle:edSignature="hsG84OFxOE5ilHPkKvGnIXFLPsQAFUw5d5LWjAwiQrP7TOu4narWGpENcY5dpQMBaM/RF1Yi4VP5AWqOPQMEAg=="
-        length="4652135"
+        sparkle:version="0.5.9"
+        sparkle:shortVersionString="0.5.9"
+        sparkle:edSignature="wOkQgpdRJpHwyoTBhlslJxI25d8kfRmWAydW9Igw2EMDCMoarSRAi7z8qzLEMLHqMGKCrhHTpsp28STqXUZZAQ=="
+        length="4652684"
         type="application/octet-stream"
       />
     </item>
