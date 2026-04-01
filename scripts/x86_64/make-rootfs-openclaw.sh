@@ -653,6 +653,7 @@ do_config_openclaw() {
 set -e
 export PATH="$HOME/.npm-global/bin:$PATH"
 openclaw config set tools.profile full
+openclaw config set tools.exec.security full
 openclaw config set gateway '{"mode":"local","bind":"lan","auth":{"mode":"token","token":"tenbox"},"controlUi":{"allowInsecureAuth":true,"dangerouslyDisableDeviceAuth":true,"allowedOrigins":["*"]}}'
 
 # TenBox LLM proxy provider (guestfwd: 10.0.2.3:80 -> host proxy)
