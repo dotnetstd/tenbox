@@ -27,7 +27,6 @@ ROOT_PASSWORD="${ROOT_PASSWORD:-tenbox}"
 USER_NAME="${USER_NAME:-tenbox}"
 USER_PASSWORD="${USER_PASSWORD:-tenbox}"
 HERMES_VERSION="${HERMES_VERSION-}"
-HERMES_INSTALL_BROWSER_TOOLS="${HERMES_INSTALL_BROWSER_TOOLS:-0}"
 INCLUDE_PKGS="systemd-sysv,udev,dbus,sudo,\
 iproute2,iputils-ping,ifupdown,dhcpcd-base,\
 ca-certificates,curl,wget,\
@@ -64,9 +63,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-LATEST_HINT_KEY="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+LATEST_HINT_KEY="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
     "$SUITE" "$MIRROR" "$MIRROR_SECURITY" "$ROOT_PASSWORD" "$USER_NAME" "$USER_PASSWORD" \
-    "$HERMES_INSTALL_BROWSER_TOOLS" \
     | cksum | awk '{print $1}')"
 LATEST_VERSION_HINT="$CACHE_DIR/hermes-latest-x86_64-${LATEST_HINT_KEY}.txt"
 
@@ -134,9 +132,9 @@ resolve_effective_hermes_version() {
 
 resolve_effective_hermes_version
 
-STATE_KEY="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+STATE_KEY="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
     "$SUITE" "$MIRROR" "$MIRROR_SECURITY" "$ROOT_PASSWORD" "$USER_NAME" "$USER_PASSWORD" \
-    "$HERMES_VERSION" "$HERMES_INSTALL_BROWSER_TOOLS" \
+    "$HERMES_VERSION" \
     | cksum | awk '{print $1}')"
 STATE_SUFFIX="${SUITE}-${STATE_KEY}"
 
@@ -601,31 +599,13 @@ EOF
 
 do_install_usertools() {
     sudo chroot "$MOUNT_DIR" /bin/bash -e << EOF
-browser_ready=0
-if dpkg -s chromium &>/dev/null; then
-    if [ "$HERMES_INSTALL_BROWSER_TOOLS" != "1" ] || dpkg -s ffmpeg &>/dev/null; then
-        browser_ready=1
-    fi
-fi
-
-if dpkg -s jq &>/dev/null && [ "$browser_ready" = "1" ]; then
+if dpkg -s jq &>/dev/null && dpkg -s chromium &>/dev/null && dpkg -s ffmpeg &>/dev/null; then
     echo "  User tools already installed"
     exit 0
 fi
-if ! dpkg -s jq &>/dev/null; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        jq
-fi
 
-if ! dpkg -s chromium &>/dev/null; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        chromium
-fi
-
-if [ "$HERMES_INSTALL_BROWSER_TOOLS" = "1" ] && ! dpkg -s ffmpeg &>/dev/null; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ffmpeg
-fi
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    jq chromium ffmpeg
 
 if ! grep -q 'PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH' /home/$USER_NAME/.bashrc 2>/dev/null; then
     echo "export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium" >> /home/$USER_NAME/.bashrc
@@ -765,11 +745,13 @@ cd "\$INSTALL_DIR"
 uv python install 3.11
 uv venv venv --python 3.11
 VIRTUAL_ENV="\$INSTALL_DIR/venv" uv pip install -e .
+VIRTUAL_ENV="\$INSTALL_DIR/venv" uv pip install qrcode[pil]
 
 ln -sf "\$INSTALL_DIR/venv/bin/hermes" /usr/local/bin/hermes
 ln -sf "\$INSTALL_DIR/venv/bin/hermes-agent" /usr/local/bin/hermes-agent
 
 chown -R $USER_NAME:$USER_NAME "\$HERMES_HOME"
+[ -d "\$USER_HOME/.local" ] && chown -R $USER_NAME:$USER_NAME "\$USER_HOME/.local"
 rm -rf "\$TMP_DIR" /tmp/hermes-agent.tar.gz
 EOF
 
@@ -789,7 +771,7 @@ USER_HOME=/home/$USER_NAME
 HERMES_DIR=\$USER_HOME/.hermes
 UNIT_DIR=\$USER_HOME/.config/systemd/user
 
-if [ -f "\$UNIT_DIR/hermes-agent.service" ]; then
+if [ -f "\$UNIT_DIR/hermes-gateway.service" ]; then
     echo "  Hermes systemd service already installed"
     exit 0
 fi
@@ -812,6 +794,9 @@ if [ ! -f "\$HERMES_DIR/.env" ]; then
 # TenBox LLM proxy provider (guestfwd: 10.0.2.3:80 -> host proxy)
 OPENAI_BASE_URL=http://10.0.2.3/v1
 OPENAI_API_KEY=tenbox
+
+# Browser
+AGENT_BROWSER_HEADED=true
 ENVEOF
     chown -R $USER_NAME:$USER_NAME "\$HERMES_DIR"
 fi
@@ -824,39 +809,46 @@ model:
 CFGEOF
 chown $USER_NAME:$USER_NAME "\$HERMES_DIR/config.yaml"
 
-# Install systemd user service for Hermes Agent
+# Install systemd user service for Hermes Gateway
 mkdir -p "\$UNIT_DIR"
 
-cat > "\$UNIT_DIR/hermes-agent.service" << UNIT
+HERMES_AGENT_DIR=\$HERMES_DIR/hermes-agent
+cat > "\$UNIT_DIR/hermes-gateway.service" << UNIT
 [Unit]
-Description=Hermes Agent
-After=network-online.target
-Wants=network-online.target
+Description=Hermes Agent Gateway - Messaging Platform Integration
+After=network.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/hermes-agent
+ExecStart=\$HERMES_AGENT_DIR/venv/bin/python -m hermes_cli.main gateway run --replace
+WorkingDirectory=\$HERMES_AGENT_DIR
+Environment="PATH=\$HERMES_AGENT_DIR/venv/bin:\$HERMES_AGENT_DIR/node_modules/.bin:/usr/bin:\$USER_HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="VIRTUAL_ENV=\$HERMES_AGENT_DIR/venv"
+Environment="HERMES_HOME=\$HERMES_DIR"
 Restart=on-failure
-RestartSec=10
-KillMode=process
-WorkingDirectory=\$USER_HOME
-Environment=HOME=\$USER_HOME
-Environment=PATH=\$USER_HOME/.local/bin:\$USER_HOME/bin:/usr/local/bin:/usr/bin:/bin
-Environment=HERMES_HOME=\$HERMES_DIR
-EnvironmentFile=-\$HERMES_DIR/.env
+RestartSec=30
+RestartForceExitStatus=75
+KillMode=mixed
+KillSignal=SIGTERM
+ExecReload=/bin/kill -USR1 \$MAINPID
+TimeoutStopSec=60
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=default.target
 UNIT
 
-mkdir -p "\$UNIT_DIR/hermes-agent.service.d"
-cat > "\$UNIT_DIR/hermes-agent.service.d/override.conf" << OVERRIDE
+mkdir -p "\$UNIT_DIR/hermes-gateway.service.d"
+cat > "\$UNIT_DIR/hermes-gateway.service.d/override.conf" << OVERRIDE
 [Service]
 Environment=DISPLAY=:0
 OVERRIDE
 
 mkdir -p "\$UNIT_DIR/default.target.wants"
-ln -sf ../hermes-agent.service "\$UNIT_DIR/default.target.wants/hermes-agent.service"
+ln -sf ../hermes-gateway.service "\$UNIT_DIR/default.target.wants/hermes-gateway.service"
 
 chown -R $USER_NAME:$USER_NAME \$USER_HOME/.config
 
